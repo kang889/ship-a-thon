@@ -117,8 +117,67 @@ class MainActivity : Activity() {
         button(content, "Student Memory Pro") { Billing.show(this) }
         button(content, "Weather context") { weather() }
         button(content, "Student memory") { memory() }
-        if (view.optBoolean("umbrella")) text(column(content),
-            "Bring an umbrella · rain is likely" + if (view.optBoolean("weatherMock")) " (demo weather)" else "", 18f)
+        if (view.optBoolean("weatherChecked")) {
+            val card = column(content)
+
+            text(
+                card,
+                "WEATHER",
+                12f,
+                green
+            )
+
+            val probability =
+                view.optInt("weatherRainProbability", -1)
+
+            val hasEventToday =
+                view.optBoolean("weatherHasEventToday")
+
+            val umbrella =
+                view.optBoolean("umbrella")
+
+            if (!hasEventToday) {
+                text(
+                    card,
+                    "Weather checked · no event scheduled for today.",
+                    16f
+                )
+            } else if (probability >= 0) {
+                text(
+                    card,
+                    "Rain chance while you're out today: $probability%",
+                    18f
+                )
+
+                if (umbrella) {
+                    text(
+                        card,
+                        "☂ Bring an umbrella",
+                        20f
+                    )
+                } else {
+                    text(
+                        card,
+                        "No umbrella reminder needed.",
+                        16f
+                    )
+                }
+            } else {
+                text(
+                    card,
+                    "Weather checked, but no usable forecast was found.",
+                    16f
+                )
+            }
+
+            if (view.optBoolean("weatherMock")) {
+                text(
+                    card,
+                    "Demo weather",
+                    12f
+                )
+            }
+        }
         if (Account.configured) button(content, "Sign in / create account") { signIn() }
         if (BuildConfig.BACKEND_URL.isNotBlank()) button(content, "Connect backend session") {
             val input = EditText(this).apply { hint = "Firebase identity token (or local development token)" }
@@ -301,24 +360,145 @@ class MainActivity : Activity() {
     }
     private fun weather() {
         if (BuildConfig.BACKEND_URL.isBlank()) {
-            run(JSONObject().put("action", "weather").put("mock", true))
-            Toast.makeText(this, "Demo forecast: 75% rain. Umbrella appears for travel today.", Toast.LENGTH_LONG).show()
+            val updated = run(
+                JSONObject()
+                    .put("action", "weather")
+                    .put("mock", true)
+            )
+
+            if (updated) {
+                Toast.makeText(
+                    this,
+                    "Demo forecast loaded.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+
             return
         }
-        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 16, 28, 16) }
-        val latitude = EditText(this).apply { hint = "Latitude"; form.addView(this) }
-        val longitude = EditText(this).apply { hint = "Longitude"; form.addView(this) }
-        AlertDialog.Builder(this).setTitle("Weather location (no background tracking)").setView(form)
+
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 16, 28, 16)
+        }
+
+        val latitude = EditText(this).apply {
+            hint = "Latitude"
+            form.addView(this)
+        }
+
+        val longitude = EditText(this).apply {
+            hint = "Longitude"
+            form.addView(this)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Weather location (no background tracking)")
+            .setView(form)
             .setPositiveButton("Get forecast") { _, _ ->
-                val lat = latitude.text.toString().toDoubleOrNull()
-                val lon = longitude.text.toString().toDoubleOrNull()
-                if (lat == null || lon == null) { Toast.makeText(this, "Enter valid coordinates", Toast.LENGTH_LONG).show(); return@setPositiveButton }
-                backend("/weather?latitude=$lat&longitude=$lon") { result ->
-                    if (result.optBoolean("available")) run(JSONObject().put("action", "weather")
-                        .put("rain_probability", result.getInt("rain_probability")).put("mock", result.getBoolean("mock")))
-                    else Toast.makeText(this, "Forecast unavailable. Your checklist still works.", Toast.LENGTH_LONG).show()
+                val lat =
+                    latitude.text.toString().toDoubleOrNull()
+
+                val lon =
+                    longitude.text.toString().toDoubleOrNull()
+
+                if (lat == null || lon == null) {
+                    Toast.makeText(
+                        this,
+                        "Enter valid coordinates",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    return@setPositiveButton
                 }
-            }.setNegativeButton("Cancel", null).show()
+
+                backend(
+                    "/weather?latitude=$lat&longitude=$lon"
+                ) { result ->
+
+                    if (!result.optBoolean("available")) {
+                        Toast.makeText(
+                            this,
+                            "Forecast unavailable. Your checklist still works.",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        return@backend
+                    }
+
+                    val hourly =
+                        result.optJSONArray("hourly")
+                            ?: JSONArray()
+
+                    val hourlyForCore =
+                        JSONArray()
+
+                    for (i in 0 until hourly.length()) {
+                        val point =
+                            hourly.getJSONObject(i)
+
+                        val minute =
+                            LocalDateTime
+                                .parse(
+                                    point.getString("time")
+                                )
+                                .toEpochSecond(
+                                    ZoneOffset.UTC
+                                ) / 60
+
+                        hourlyForCore.put(
+                            JSONObject()
+                                .put(
+                                    "time",
+                                    minute
+                                )
+                                .put(
+                                    "rain_probability",
+                                    point.getInt(
+                                        "rain_probability"
+                                    )
+                                )
+                        )
+                    }
+
+                    val updated = run(
+                        JSONObject()
+                            .put(
+                                "action",
+                                "weather"
+                            )
+                            .put(
+                                "rain_probability",
+                                result.getInt(
+                                    "rain_probability"
+                                )
+                            )
+                            .put(
+                                "hourly",
+                                hourlyForCore
+                            )
+                            .put(
+                                "mock",
+                                result.getBoolean(
+                                    "mock"
+                                )
+                            )
+                    )
+
+                    if (updated) {
+                        Toast.makeText(
+                            this,
+                            "Forecast updated · ${hourly.length()} hourly points loaded",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+            .setNegativeButton(
+                "Cancel",
+                null
+            )
+            .show()
     }
     private fun memory() {
         val input = EditText(this).apply { hint = "Write a note, or ask what you need tomorrow"; minLines = 3 }

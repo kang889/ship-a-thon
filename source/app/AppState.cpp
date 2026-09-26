@@ -56,7 +56,14 @@ AppState::AppState(const Json &saved, const Weights &weights, const Json &templa
             throw std::invalid_argument("Saved item state is invalid.");
     }
     mProfile = saved.at("profile").get<decltype(mProfile)>();
+
     mRainProbability = saved.value("rainProbability", -1);
+
+    if (saved.contains("hourlyWeather")) {
+        mHourlyWeather =
+            saved.at("hourlyWeather").get<std::vector<WeatherHour>>();
+    }
+
     mWeatherAt = saved.value("weatherAt", Minute{0});
     mWeatherMock = saved.value("weatherMock", false);
     mMemories = saved.value("memories", Json::object());
@@ -80,6 +87,7 @@ Json AppState::Save() const {
             {"states", mStates},
             {"profile", mProfile},
             {"rainProbability", mRainProbability},
+            {"hourlyWeather", mHourlyWeather},
             {"weatherAt", mWeatherAt},
             {"weatherMock", mWeatherMock},
             {"timing", mTiming},
@@ -217,20 +225,65 @@ Json AppState::Execute(const Json &command) {
         }
         return {{"ok", true}, {"state", Save()}, {"view", View(now)}, {"preview", preview}, {"mock", mock}};
     }
-    if (action == "weather") {
-        if (command.value("mock", false)) {
-            FakeBackend backend;
-            mRainProbability = backend.Weather().data.at("rain_probability");
-            mWeatherMock = true;
-        } else {
-            const auto probability = command.at("rain_probability").get<int>();
-            if (probability < 0 || probability > 100)
-                throw std::invalid_argument("Invalid rain probability.");
-            mRainProbability = probability;
-            mWeatherMock = false;
-        }
-        mWeatherAt = now;
-    } else if (action == "confirm_import") {
+        if (action == "weather") {
+            mHourlyWeather.clear();
+
+            if (command.value("mock", false)) {
+                FakeBackend backend;
+
+                mRainProbability =
+                    backend.Weather().data.at("rain_probability");
+
+                mWeatherMock = true;
+            } else {
+                const auto probability =
+                    command.at("rain_probability").get<int>();
+
+                if (probability < 0 || probability > 100) {
+                    throw std::invalid_argument(
+                        "Invalid rain probability."
+                    );
+                }
+
+                mRainProbability = probability;
+
+                if (command.contains("hourly")) {
+                    for (const auto &point : command.at("hourly")) {
+                        const auto time =
+                            point.at("time").get<Minute>();
+
+                        const auto rainProbability =
+                            point.at("rain_probability").get<int>();
+
+                        if (
+                            time < 0 ||
+                            rainProbability < 0 ||
+                            rainProbability > 100
+                        ) {
+                            throw std::invalid_argument(
+                                "Invalid hourly weather."
+                            );
+                        }
+
+                        mHourlyWeather.push_back(
+                            {time, rainProbability}
+                        );
+                    }
+
+                    std::sort(
+                        mHourlyWeather.begin(),
+                        mHourlyWeather.end(),
+                        [](const WeatherHour &a, const WeatherHour &b) {
+                            return a.time < b.time;
+                        }
+                    );
+                }
+
+                mWeatherMock = false;
+            }
+
+            mWeatherAt = now;
+        } else if (action == "confirm_import") {
         if (!command.value("confirmed", false))
             throw std::invalid_argument("Review and confirm the import before saving.");
         const auto events = command.at("events").get<std::vector<Event>>();
@@ -397,18 +450,71 @@ Json AppState::View(Minute now) const {
     }
     std::sort(plans.begin(), plans.end(),
               [](const auto &a, const auto &b) { return a.at("fireAt") < b.at("fireAt"); });
-    bool travelling = false;
+    const auto today = now / 1440;
+
+    bool hasEventToday = false;
+    Minute firstEventStart = 0;
+
     for (const auto &occurrence : occurrences) {
-        if (occurrence.start >= now && occurrence.start / 1440 == now / 1440 &&
-            !occurrence.event.location.empty())
-            travelling = true;
+        if (occurrence.start / 1440 != today)
+            continue;
+
+        if (!hasEventToday || occurrence.start < firstEventStart)
+            firstEventStart = occurrence.start;
+
+        hasEventToday = true;
     }
-    const bool fresh = mWeatherAt <= now && now - mWeatherAt <= 60;
-    const bool umbrella = fresh && ContextEngine::SuggestUmbrella(mRainProbability, travelling, mWeights);
-    return {{"events", events},
-            {"tasks", tasks},
-            {"notifications", plans},
-            {"umbrella", umbrella},
-            {"weatherMock", mWeatherMock}};
+
+    int relevantRainProbability = -1;
+
+    if (hasEventToday) {
+        if (!mHourlyWeather.empty()) {
+            const auto estimatedLeaveTime =
+                firstEventStart - mWeights.bringLead;
+
+            const auto weatherStart =
+                std::max(now, estimatedLeaveTime);
+
+            const auto endOfToday =
+                (today + 1) * 1440;
+
+            relevantRainProbability =
+                ContextEngine::MaxRainProbability(
+                    mHourlyWeather,
+                    weatherStart,
+                    endOfToday
+                );
+        }
+
+        // Fallback for demo weather or old saved states.
+        if (relevantRainProbability < 0)
+            relevantRainProbability = mRainProbability;
+    }
+
+    const bool fresh =
+        mWeatherAt > 0 &&
+        mWeatherAt <= now &&
+        mWeatherAt / 1440 == today;
+
+    const bool umbrella =
+        fresh &&
+        ContextEngine::SuggestUmbrella(
+            relevantRainProbability,
+            hasEventToday,
+            mWeights
+        );
+
+    return {
+        {"events", events},
+        {"tasks", tasks},
+        {"notifications", plans},
+
+        {"weatherChecked", fresh},
+        {"weatherHasEventToday", hasEventToday},
+        {"weatherRainProbability", relevantRainProbability},
+
+        {"umbrella", umbrella},
+        {"weatherMock", mWeatherMock}
+    };
 }
 } // namespace memory

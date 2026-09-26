@@ -1092,3 +1092,12 @@ at the right time.
 ### One-sentence pitch
 
 > **A university checklist that automatically knows what you need today based on your timetable, upcoming requirements and real-world context—and reminds you not to leave those things behind after class.**
+
+
+
+For local Android emulator testing, start the backend on 127.0.0.1:8000
+and build the Android app with:
+
+gradlew.bat installDebug -PbackendUrl=http://10.0.2.2:8000
+
+10.0.2.2 is the Android emulator alias for the host machine.
