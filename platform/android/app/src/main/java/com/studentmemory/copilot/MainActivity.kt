@@ -78,6 +78,27 @@ class MainActivity : Activity() {
         identityToken
       }
     }
+    private fun syncEvents() {
+     if (BuildConfig.BACKEND_URL.isBlank()) return
+
+     val events = state.optJSONArray("events") ?: JSONArray()
+     val body = JSONObject()
+        .put("events", JSONArray(events.toString()))
+
+     Thread {
+        try {
+            BackendClient(backendToken()).request("/sync", body)
+        } catch (error: Exception) {
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    "Saved locally; cloud sync pending",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+     }.start()
+    }
     private fun time(minute: Long) = LocalDateTime.ofEpochSecond(minute * 60, 0, ZoneOffset.UTC)
         .format(DateTimeFormatter.ofPattern("EEE d MMM · HH:mm"))
     private fun render(view: JSONObject) {
@@ -338,6 +359,23 @@ class MainActivity : Activity() {
             done(result)
         } catch (error: Exception) { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() }
     }
+    private fun deleteEventFromBackend(id: String) {
+     if (BuildConfig.BACKEND_URL.isBlank()) return
+
+     Thread {
+        try {
+            BackendClient(backendToken()).delete("/events/$id")
+        } catch (error: Exception) {
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    "Deleted locally; cloud deletion pending",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+     }.start()
+    }
     private fun signIn() {
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 16, 28, 16) }
         val email = EditText(this).apply { hint = "Email"; inputType = 33; form.addView(this) }
@@ -396,7 +434,9 @@ class MainActivity : Activity() {
         if (original != null && onSave == null) dialog.setNeutralButton("Delete") { _, _ ->
             AlertDialog.Builder(this).setTitle("Delete this event and all its occurrences?")
                 .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ ->
-                    run(JSONObject().put("action", "delete_event").put("id", original.getString("id")))
+                   val id = original.getString("id")
+                   if (run(JSONObject().put("action", "delete_event").put("id", id))) {
+                    deleteEventFromBackend(id)}
                 }.show()
         }
         val shown = dialog.create()
@@ -424,6 +464,7 @@ class MainActivity : Activity() {
                     val result = store.execute(JSONObject().put("action", "save_event").put("event", event))
                     state = result.getJSONObject("state")
                     Reminders.schedule(this, result.getJSONObject("view").getJSONArray("notifications"))
+                    syncEvents()
                     render(result.getJSONObject("view")); shown.dismiss()
                 } catch (error: Exception) { Toast.makeText(this, error.message ?: "Check the entered values", Toast.LENGTH_LONG).show() }
             }
