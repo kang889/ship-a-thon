@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from backend.ai.provider import FakeProvider
-from backend.ai.schemas import ExtractionInput, Timetable
+from backend.ai.schemas import ExtractionInput, Instruction, Timetable
 from backend.ai.service import ExtractionService
 from backend.api.main import create_app
 from backend.api.models import MemoryRecord
@@ -175,3 +175,67 @@ def test_pro_gate_fails_closed_and_caches(settings, monkeypatch):
     gate.require_pro("alice")
     gate.require_pro("alice")
     assert get.call_count == 2
+
+
+def test_valid_instruction_structured_extraction(client):
+    # Phase 13: pasted lecturer text returns strict structured Bring/Do information,
+    # requires confirmation, and never auto-persists an event.
+    body = {
+        "text": "Next Wednesday complete Questions 1-8 and bring your scientific calculator.",
+        "reference_date": "2026-09-26",
+    }
+    response = client.post("/api/v1/ai/instruction/extract", json=body)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requires_confirmation"] and payload["mock"] and not payload["cached"]
+    data = payload["data"]
+    # Structured fields validate against the Instruction schema before reaching the client.
+    Instruction.model_validate(data)
+    assert data["required_items"] == ["Scientific calculator"]
+    assert data["tasks"] and "duration" in data["tasks"][0]
+    # Extraction alone must not create any event.
+    assert client.get("/api/v1/events").json() == []
+
+
+def test_invalid_instruction_schema_rejection():
+    # A missing required date and an out-of-range task duration must both be rejected,
+    # so malformed AI output can never be silently trusted.
+    with pytest.raises(ValidationError):
+        Instruction.model_validate({"related_event": "Math", "required_items": [], "tasks": []})
+    with pytest.raises(ValidationError):
+        Instruction.model_validate(
+            {
+                "related_event": "Math",
+                "date": "2026-10-07",
+                "required_items": [],
+                "tasks": [{"title": "Prep", "duration": 0}],
+            }
+        )
+
+
+def test_instruction_extraction_cache(client):
+    # Phase 13: identical instruction input is served from the content-hash cache
+    # on the second request rather than calling the provider again.
+    body = {"text": "Bring the lab manual on Monday.", "reference_date": "2026-09-26"}
+    first = client.post("/api/v1/ai/instruction/extract", json=body)
+    assert first.status_code == 200 and not first.json()["cached"]
+    second = client.post("/api/v1/ai/instruction/extract", json=body)
+    assert second.status_code == 200 and second.json()["cached"]
+    assert first.json()["data"] == second.json()["data"]
+
+
+def test_extraction_cache_is_user_scoped(settings):
+    # The cache is keyed per authenticated user, so one student's extraction can never
+    # be served to another student.
+    provider = Mock(wraps=FakeProvider())
+    provider.identity = "fake-v1"
+    service = ExtractionService(Repository(settings.database_url), provider, settings)
+    request = ExtractionInput(text="shared timetable", reference_date="2026-09-26")
+    alice_first = service.extract("alice", "timetable", request)
+    assert not alice_first["cached"]
+    # A different user with identical input must trigger a fresh extraction, not a cache hit.
+    bob = service.extract("bob", "timetable", request)
+    assert not bob["cached"]
+    alice_second = service.extract("alice", "timetable", request)
+    assert alice_second["cached"]
+    assert provider.extract.call_count == 2  # one per distinct user, no cross-user reuse
