@@ -1,0 +1,14 @@
+{
+  "frequency": 0.30,
+  "association": 0.25,
+  "importance": 0.20,
+  "unusualness": 0.15,
+  "urgency": 0.10,
+  "medium": 0.35,
+  "high": 0.60,
+  "veryHigh": 0.80,
+  "bringLead": 60,
+  "returnLead": 10,
+  "rainThreshold": 60,
+  "minimumSamples": 5
+}

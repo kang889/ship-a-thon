@@ -1,5 +1,7 @@
 # 🎒 University Smart Checklist
 
+> **Implementation update:** Follow [BUILD.md](BUILD.md) for the current C++/Kotlin architecture and [docs/SETUP.md](docs/SETUP.md) for build commands, configuration, cost controls and verified status. The architecture and roadmap below are the original concept and are superseded by BUILD.md.
+
 > A context-aware Android checklist that automatically reminds university students what to bring, what to take home, and what needs to be completed based on their timetable, upcoming tasks, and real-world context.
 
 ## Problem

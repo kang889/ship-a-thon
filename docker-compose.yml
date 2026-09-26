@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        ONLINE_DEPENDENCIES: ${ONLINE_DEPENDENCIES:-false}
+    ports: ["127.0.0.1:8000:8000"]
+    environment:
+      APP_MODE: ${APP_MODE:-MOCK}
+      DATABASE_URL: postgresql+psycopg://student:local-development@postgres/student
+      QDRANT_URL: http://qdrant:6333
+      DEV_TOKEN: ${DEV_TOKEN:-local-development-only}
+      ENABLE_PAID_AI: ${ENABLE_PAID_AI:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DAILY_USER_AI_CALLS: ${DAILY_USER_AI_CALLS:-5}
+      DAILY_GLOBAL_AI_CALLS: ${DAILY_GLOBAL_AI_CALLS:-50}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes: ["models:/home/student/.cache"]
+  postgres:
+    image: postgres:17.4-alpine
+    environment:
+      POSTGRES_USER: student
+      POSTGRES_PASSWORD: local-development
+      POSTGRES_DB: student
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U student"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    volumes: ["vectors:/qdrant/storage"]
+volumes:
+  postgres:
+  vectors:
+  models:
