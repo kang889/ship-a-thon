@@ -87,6 +87,60 @@ def test_weather_timeout(monkeypatch):
     monkeypatch.setattr(httpx, "get", timeout)
     assert WeatherService().forecast(1.3, 103.8)["available"] is False
 
+def test_weather_hourly_forecast(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "daily": {
+                    "precipitation_probability_max": [80]
+                },
+                "hourly": {
+                    "time": [
+                        "2026-09-27T14:00",
+                        "2026-09-27T15:00",
+                    ],
+                    "precipitation_probability": [
+                        70,
+                        80,
+                    ],
+                    "temperature_2m": [
+                        29.5,
+                        28.8,
+                    ],
+                    "weather_code": [
+                        61,
+                        63,
+                    ],
+                },
+            }
+
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    result = WeatherService().forecast(1.35, 103.68)
+
+    assert result["available"] is True
+    assert result["mock"] is False
+
+    assert result["rain_probability"] == 80
+
+    assert len(result["hourly"]) == 2
+
+    assert result["hourly"][0] == {
+        "time": "2026-09-27T14:00",
+        "rain_probability": 70,
+        "temperature": 29.5,
+        "weather_code": 61,
+    }
+
+    assert result["hourly"][1]["rain_probability"] == 80
+
 
 def test_event_crud_and_memory(client):
     event = {"id": "lab", "title": "Lab", "start": 30000840, "end": 30000960}
