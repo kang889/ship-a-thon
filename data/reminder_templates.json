@@ -1,0 +1,5 @@
+{
+  "NORMAL": {"bring": "Bring: ", "return": "Before you go, check: "},
+  "FRIENDLY": {"bring": "Ready for class? Pack: ", "return": "Quick check before you go: "},
+  "AGGRESSIVE": {"bring": "BAG CHECK: ", "return": "DON'T LEAVE YET. CHECK: "}
+}

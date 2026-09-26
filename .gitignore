@@ -1,0 +1,15 @@
+out/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+*.db
+.gradle/
+.cxx/
+**/.cxx/
+.ruff_cache/
+**/build/
+local.properties
+.idea/
+*.iml
