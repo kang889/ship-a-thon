@@ -69,6 +69,15 @@ class MainActivity : Activity() {
         setBackgroundColor(Color.WHITE)
         parent.addView(this, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 10, 0, 10) })
     }
+    private fun backendToken(): String {
+      return if (BuildConfig.DEBUG && BuildConfig.BACKEND_URL.startsWith("http://10.0.2.2")) {
+        "local-development-only"
+      } else if (Account.configured) {
+        Account.token()
+      } else {
+        identityToken
+      }
+    }
     private fun time(minute: Long) = LocalDateTime.ofEpochSecond(minute * 60, 0, ZoneOffset.UTC)
         .format(DateTimeFormatter.ofPattern("EEE d MMM · HH:mm"))
     private fun render(view: JSONObject) {
@@ -208,7 +217,7 @@ class MainActivity : Activity() {
                     .put("event_id", eventId)
                 if (BuildConfig.BACKEND_URL.isBlank()) command.put("input", input.toString())
                 else {
-                    val result = BackendClient(if (Account.configured) Account.token() else identityToken).request("/ai/$kind/extract", input)
+                    val result = BackendClient(backendToken()).request("/ai/$kind/extract", input)
                     command.put("data", result.getJSONObject("data")).put("mock", result.getBoolean("mock"))
                 }
                 val result = store.execute(command)
@@ -260,7 +269,7 @@ class MainActivity : Activity() {
     private fun backend(path: String, body: JSONObject? = null, done: (JSONObject) -> Unit) {
         Thread {
             try {
-                val token = if (Account.configured) Account.token() else identityToken
+                val token = backendToken()
                 val result = BackendClient(token).request(path, body)
                 runOnUiThread { done(result) }
             } catch (error: Exception) {
@@ -315,7 +324,7 @@ class MainActivity : Activity() {
         }
         Thread {
             try {
-                BackendClient(if (Account.configured) Account.token() else identityToken).delete("/memory/$id")
+                BackendClient(backendToken()).delete("/memory/$id")
                 runOnUiThread { Toast.makeText(this, "Memory deleted", Toast.LENGTH_SHORT).show() }
             } catch (error: Exception) { runOnUiThread { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() } }
         }.start()

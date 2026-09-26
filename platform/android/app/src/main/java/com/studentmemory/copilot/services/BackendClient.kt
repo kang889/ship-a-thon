@@ -9,7 +9,7 @@ import java.net.URL
 class BackendClient(private val token: String) {
     fun request(path: String, body: JSONObject? = null, method: String? = null): JSONObject {
         val url = URL(BuildConfig.BACKEND_URL.trimEnd('/') + "/api/v1" + path)
-        require(url.protocol == "https") { "Configure an HTTPS backend URL before using live services." }
+        require(url.protocol == "https" || (BuildConfig.DEBUG && url.host == "10.0.2.2")) { "Configure an HTTPS backend URL before using live services."}
         val connection = url.openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = 10_000; connection.readTimeout = 30_000
