@@ -435,8 +435,8 @@ class MainActivity : Activity() {
             AlertDialog.Builder(this).setTitle("Delete this event and all its occurrences?")
                 .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ ->
                    val id = original.getString("id")
-                   if (run(JSONObject().put("action", "delete_event").put("id", id))) 
-                    {deleteEventFromBackend(id)}
+                   if (run(JSONObject().put("action", "delete_event").put("id", id))) {
+                    deleteEventFromBackend(id)}
                 }.show()
         }
         val shown = dialog.create()
