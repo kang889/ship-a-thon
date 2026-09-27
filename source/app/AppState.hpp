@@ -38,6 +38,7 @@ class AppState {
     Minute mWeatherAt = 0;
 
     bool mWeatherMock = false;
+    Minute mUmbrellaPackedDay = -1;
 
     std::map<std::string, std::array<TimingBucket, 5>> mTiming;
 

@@ -59,7 +59,7 @@ class PackBackComponents(val context: Context, val theme: PackBackTheme = PackBa
         Space(copy,5)
         if (risk || checked) copy.addView(Pill(if (risk) "High risk" else status,if (risk) Tone.Risk else Tone.Safe))
         else copy.addView(Label(status,13f,color=theme.muted))
-        if (risk && reason.isNotBlank()) { Space(copy,5); copy.addView(Label(reason,12f,color=theme.risk)) }
+        if (reason.isNotBlank()) { Space(copy,5); copy.addView(Label(reason,12f,color=if(risk) theme.risk else theme.secondary)) }
         addView(copy,LinearLayout.LayoutParams(0,-2,1f))
         addView(FrameLayout(context).apply {
             background = theme.shape(if (checked) theme.safe else theme.card,99,if (checked) null else theme.line)

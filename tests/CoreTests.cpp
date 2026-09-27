@@ -1,5 +1,6 @@
 #include "app/AppState.hpp"
 #include "services/FakeBackend.hpp"
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -100,10 +101,27 @@ int main(int argc, char **argv) {
             return forecastApp.Execute({{"action", "weather"}, {"now", nowWeather},
                                         {"mock", true}, {"hourly", hours}}).at("view");
         };
-        Check(forecast(60, start + 120)["umbrella"] == false, "exactly 60 is safe");
+        auto noUmbrella = forecast(60, start + 120);
+        Check(noUmbrella["umbrella"] == false && noUmbrella["todayBring"][0]["name"] == "Charger",
+              "exactly 60 does not add umbrella to bring list");
         auto decision = forecast(61, start + 120);
         Check(decision["umbrella"] == true && decision["weatherLastEventStart"] == later.start,
               "rain before last event triggers");
+        Check(decision["todayBring"][0]["name"] == "Umbrella" &&
+              decision["todayBring"][1]["eventTitle"] == "Programming Lab" &&
+              decision["todayBring"].back()["eventTitle"] == "Evening class",
+              "umbrella precedes event-labelled daily items");
+        Check(std::any_of(decision["notifications"].begin(), decision["notifications"].end(),
+                          [](const auto &plan) { return plan.at("id") == "weather@20000:bring"; }),
+              "rain schedules bring umbrella reminder");
+        auto packedUmbrella = forecastApp.Execute({{"action", "umbrella_packed"},
+                                                   {"now", nowWeather}, {"packed", true}}).at("view");
+        Check(packedUmbrella["todayBring"][0]["state"] == "PACKED" &&
+              std::none_of(packedUmbrella["notifications"].begin(), packedUmbrella["notifications"].end(),
+                           [](const auto &plan) { return plan.at("id") == "weather@20000:bring"; }),
+              "packed umbrella remains visible without further weather reminder");
+        Check(AppState(forecastApp.Save()).View(nowWeather)["todayBring"][0]["state"] == "PACKED",
+              "umbrella packed state persists for today");
         Check(decision["weatherRainProbability"] == 61 && decision["weatherCovered"] == true,
               "weather context reports rule inputs");
         Check(forecast(90, later.start)["umbrella"] == false, "rain after last event ignored");
@@ -120,6 +138,25 @@ int main(int argc, char **argv) {
               "partial forecast must not guess");
         partialForecast.Execute({{"action", "weather_clear"}, {"now", nowWeather}});
         Check(partialForecast.View(nowWeather)["weatherChecked"] == false, "unavailable clears forecast");
+        auto recurring = event;
+        recurring.id = "repeat";
+        recurring.items = {{"laptop", "Laptop", .8, -1},
+                           {"shoes", "Shoes", .8, day}};
+        AppState repeating;
+        repeating.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", recurring}});
+        const auto firstDayItems = repeating.View(nowWeather)["todayBring"];
+        Check(firstDayItems.size() == 2 && firstDayItems[1]["name"] == "Shoes",
+              "one-time item appears for selected occurrence");
+        const auto nextWeekItems = repeating.View(nowWeather + 7 * 1440)["todayBring"];
+        Check(nextWeekItems.size() == 1 && nextWeekItems[0]["name"] == "Laptop",
+              "recurring event keeps regular item but omits once-only item");
+        repeating.Execute({{"action", "memory_save"}, {"now", nowWeather}, {"id", "bring_shoes"},
+                           {"text", "Bring shoes for Programming Lab"},
+                           {"event_id", "repeat"}, {"memory_type", "bring_item"},
+                           {"source", "event_addon"}});
+        Check(repeating.Save()["memories"]["bring_shoes"]["event_id"] == "repeat" &&
+              repeating.Save()["memories"]["bring_shoes"]["memory_type"] == "bring_item",
+              "add-on memory retains its event and type");
         AppState app;
         app.Execute({{"action", "save_event"}, {"now", start - 60}, {"event", event}});
         const auto key = "lab@" + std::to_string(day);

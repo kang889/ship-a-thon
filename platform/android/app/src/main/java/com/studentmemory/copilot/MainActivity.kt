@@ -11,6 +11,8 @@ import com.studentmemory.copilot.ui.Tone
 import com.studentmemory.copilot.ui.PackBackDialog
 import android.os.Build
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.View
 import android.widget.*
 import com.studentmemory.copilot.services.BackendClient
@@ -27,6 +29,9 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 class MainActivity : Activity() {
+    private val bringSuggestions = listOf("Laptop", "Notebook", "Calculator", "Graphic calculator",
+        "Laptop charger", "iPad", "Pencil box", "iPad charger", "Earphones", "Shoes",
+        "Student card", "Water bottle", "Phone charger")
     private lateinit var content: LinearLayout
     private lateinit var store: CoreStore
     private var state = JSONObject()
@@ -127,9 +132,32 @@ class MainActivity : Activity() {
             ui.Space(content,8)
             content.addView(ui.Label(LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE · d MMMM")),13f,color=palette.muted))
         }
-        if (view.optBoolean("umbrella")) {
-            ui.Space(content,12)
-            content.addView(ui.Pill("☂ Rain likely · Bring an umbrella" + if(view.optBoolean("weatherMock")) " · demo weather" else "",Tone.AI))
+        val todayBring = view.optJSONArray("todayBring") ?: JSONArray()
+        content.addView(ui.SectionHeader("Bring today", "${todayBring.length()} items"))
+        if (todayBring.length() == 0) content.addView(ui.Label("Nothing to pack for today's events.",14f,color=palette.muted))
+        for (i in 0 until todayBring.length()) {
+            val item = todayBring.getJSONObject(i)
+            val packed = item.getString("state") in setOf("PACKED","BROUGHT","IN_USE","NEEDS_TO_RETURN","SAFE")
+            val weatherItem = item.optBoolean("weather")
+            val reason = if (weatherItem) {
+                "Rain likely before your last event" +
+                    (if (view.optBoolean("weatherMock")) " · demo weather" else "")
+            } else "${item.getString("eventTitle")} · ${time(item.getLong("eventStart"))}"
+            val onTap: (() -> Unit)? = if (weatherItem) ({
+                run(JSONObject().put("action", "umbrella_packed").put("packed", !packed))
+            }) else {
+                val actions = item.optJSONArray("actions") ?: JSONArray()
+                if (actions.length() == 0) null else ({
+                    val labels = Array(actions.length()) { actions.getString(it).replace('_',' ').lowercase().replaceFirstChar { ch -> ch.uppercase() } }
+                    PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(reason)
+                        .setItems(labels) { _, index ->
+                            run(JSONObject().put("action", "transition").put("occurrence", item.getString("occurrence"))
+                                .put("item", item.getString("id")).put("target", actions.getString(index)))
+                        }.show()
+                })
+            }
+            content.addView(ui.ItemRow(item.getString("name"), if (packed) "Packed" else "To pack", reason,
+                item.optString("priority") in setOf("HIGH","VERY HIGH"), packed, onTap))
         }
         if (events.length() > 1) button(content, if (showWeek) "Focus on next event" else "Show upcoming week") {
             showWeek = !showWeek; render(view)
@@ -159,27 +187,24 @@ class MainActivity : Activity() {
             } else {
                 content.addView(ui.NextClassHeroCard(event.getString("title"),eventStart.format(DateTimeFormatter.ofPattern("h:mm a")),
                     event.getString("location"),countdown,event.getString("phase") == "NEXT",findEvent(event.getString("id"))?.optString("course")))
-                var packed = 0
-                for (j in 0 until items.length()) if (items.getJSONObject(j).getString("state") in setOf("PACKED","BROUGHT","IN_USE","NEEDS_TO_RETURN","SAFE")) packed++
-                content.addView(ui.SectionHeader("Bring", "$packed of ${items.length()} packed"))
             }
             if (event.getBoolean("overlap")) content.addView(ui.Pill("Overlaps another event",Tone.Warning))
-            if (items.length() == 0) content.addView(ui.Label("Add your essentials using Edit event.",14f,color=palette.muted))
-            for (j in 0 until items.length()) {
-                val item = items.getJSONObject(j)
-                val actions = item.getJSONArray("actions")
-                val updateItem: (() -> Unit)? = if (actions.length() > 0) ({
-                    val labels = Array(actions.length()) { actions.getString(it).replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() } }
-                    PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(item.getString("reason")).setItems(labels) { _, index ->
-                        run(JSONObject().put("action", "transition").put("occurrence", event.getString("key"))
-                            .put("item", item.getString("id")).put("target", actions.getString(index)))
-                    }.show()
-                }) else null
-                val highRisk = item.getString("priority") in setOf("HIGH","VERY HIGH")
-                val itemState = item.getString("state")
-                if (returning && back) content.addView(ui.BringBackCard(item.getString("name"),item.getString("reason"),highRisk,itemState == "SAFE",updateItem))
-                else content.addView(ui.ItemRow(item.getString("name"),itemState.replace('_',' ').lowercase().replaceFirstChar { it.uppercase() },
-                    item.getString("reason"),highRisk,itemState in setOf("PACKED","BROUGHT","IN_USE","NEEDS_TO_RETURN","SAFE"),updateItem))
+            if (returning && back && items.length() == 0) content.addView(ui.Label("No items to bring back.",14f,color=palette.muted))
+            if (returning && back) {
+                for (j in 0 until items.length()) {
+                    val item = items.getJSONObject(j)
+                    val actions = item.getJSONArray("actions")
+                    val updateItem: (() -> Unit)? = if (actions.length() > 0) ({
+                        val labels = Array(actions.length()) { actions.getString(it).replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() } }
+                        PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(item.getString("reason")).setItems(labels) { _, index ->
+                            run(JSONObject().put("action", "transition").put("occurrence", event.getString("key"))
+                                .put("item", item.getString("id")).put("target", actions.getString(index)))
+                        }.show()
+                    }) else null
+                    val highRisk = item.getString("priority") in setOf("HIGH","VERY HIGH")
+                    val itemState = item.getString("state")
+                    content.addView(ui.BringBackCard(item.getString("name"),item.getString("reason"),highRisk,itemState == "SAFE",updateItem))
+                }
             }
             if (returning) {
                 var safeCount=0
@@ -193,7 +218,7 @@ class MainActivity : Activity() {
                 // TODO(PDF p10–14): no bulk-return, forgot-location, snooze, dedicated WAIT or explanation-route callbacks.
                 // Existing per-item transition menu remains the sole handler; never synthesize a SAFE transition.
             }
-            button(content, "Edit event") { edit(findEvent(event.getString("id"))) }
+            button(content, "Edit event") { edit(findEvent(event.getString("id")), occurrenceStart = event.getLong("start")) }
         }
         val tasks = view.getJSONArray("tasks")
         if (tasks.length() > 0) content.addView(ui.SectionHeader("Do before class"))
@@ -327,13 +352,18 @@ class MainActivity : Activity() {
             .setNeutralButton("Edit details") { _, _ ->
                 AlertDialog.Builder(this).setTitle("Edit before confirming")
                     .setItems(Array(proposed.length()) { proposed.getJSONObject(it).getString("title") }) { _, index ->
-                        edit(proposed.getJSONObject(index)) { updated ->
+                        edit(proposed.getJSONObject(index), onSave = { updated ->
                             proposed.put(index, updated); preview(result)
-                        }
+                        })
                     }.show()
             }
             .setPositiveButton("Confirm and save") { _, _ ->
                 if (!run(JSONObject().put("action", "confirm_import").put("confirmed", true).put("events", proposed))) return@setPositiveButton
+                for (i in 0 until proposed.length()) {
+                    val event = proposed.getJSONObject(i)
+                    val eventItems = event.optJSONArray("items") ?: JSONArray()
+                    saveAddOnMemories(event, (0 until eventItems.length()).map { eventItems.getJSONObject(it).getString("name") })
+                }
                 val source = if (result.has("source_text")) result.optString("source_text").ifBlank { summary.toString() } else ""
                 if (source.isNotBlank()) {
                     AlertDialog.Builder(this).setTitle("Remember this instruction?")
@@ -580,6 +610,35 @@ class MainActivity : Activity() {
             done(result)
         } catch (error: Exception) { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() }
     }
+    private fun saveAddOnMemories(event: JSONObject, selected: List<String>) {
+        val items = event.optJSONArray("items") ?: return
+        val memories = mutableListOf<JSONObject>()
+        for (name in selected) {
+            if (bringSuggestions.any { it.equals(name, ignoreCase = true) }) continue
+            val item = (0 until items.length()).map { items.getJSONObject(it) }
+                .firstOrNull { it.getString("name").equals(name, ignoreCase = true) } ?: continue
+            val stableId = "bring_" + UUID.nameUUIDFromBytes(
+                "${event.getString("id")}:${item.getString("id")}".toByteArray(Charsets.UTF_8)
+            ).toString().replace("-", "")
+            memories.add(JSONObject().put("id", stableId)
+                .put("text", "Bring $name for ${event.getString("title")}")
+                .put("event_id", event.getString("id"))
+                .put("course", event.optString("course"))
+                .put("memory_type", "bring_item")
+                .put("source", "event_addon"))
+        }
+        if (memories.isEmpty()) return
+        if (BuildConfig.BACKEND_URL.isBlank()) {
+            for (memory in memories) memoryRequest("/memory", memory) {}
+        } else Thread {
+            try {
+                val client = BackendClient(backendToken())
+                for (memory in memories) client.request("/memory", memory)
+            } catch (error: Exception) {
+                runOnUiThread { Toast.makeText(this, "Event saved; add-on memory sync pending: ${error.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.start()
+    }
     private fun deleteEventFromBackend(id: String) {
      if (BuildConfig.BACKEND_URL.isBlank()) return
 
@@ -627,7 +686,7 @@ class MainActivity : Activity() {
                 event.getString("title") + "\n" + time(event.getLong("start")) + "\n" + event.optString("location")
             } }) { _, index -> edit(events.getJSONObject(index)) }.show()
     }
-    private fun edit(original: JSONObject?, onSave: ((JSONObject) -> Unit)? = null) {
+    private fun edit(original: JSONObject?, onSave: ((JSONObject) -> Unit)? = null, occurrenceStart: Long? = null) {
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 12, 28, 12) }
         fun field(label: String, value: String): EditText {
             text(form, label, 13f)
@@ -646,14 +705,90 @@ class MainActivity : Activity() {
             setSelection(when(original?.optInt("repeatDays")) { 1 -> 1; 7 -> 2; else -> 0 }); form.addView(this)
         }
         val oldItems = original?.optJSONArray("items") ?: JSONArray()
-        val items = field("Bring · one item per line (applies to every occurrence)",
-            (0 until oldItems.length()).joinToString("\n") { oldItems.getJSONObject(it).getString("name") })
-        items.minLines = 2
-        val once = CheckBox(this).apply { text = "New items: only for this date"; form.addView(this) }
+        val editingDay = occurrenceStart?.div(1440) ?: date?.toLocalDate()?.toEpochDay() ?: LocalDate.now().toEpochDay()
+        val activeItems = (0 until oldItems.length()).map { oldItems.getJSONObject(it) }
+            .filter { it.optLong("onlyDay", -1) in listOf(-1L, editingDay) }
+        text(form, "Common things to bring", 16f)
+        val chipTheme = PackBackTheme(this)
+        fun styleChip(chip: CheckBox) {
+            chip.background = chipTheme.ripple(
+                if (chip.isChecked) chipTheme.brandSoft else chipTheme.card, 14,
+                if (chip.isChecked) chipTheme.brand else chipTheme.line
+            )
+        }
+        fun chip(name: String, checked: Boolean): CheckBox = CheckBox(this).apply {
+            text = name
+            buttonDrawable = null
+            gravity = android.view.Gravity.CENTER
+            setPadding(chipTheme.dp(8), chipTheme.dp(6), chipTheme.dp(8), chipTheme.dp(6))
+            isChecked = checked
+            styleChip(this)
+        }
+        fun addChipRows(container: LinearLayout, chips: List<CheckBox>) {
+            for (pair in chips.chunked(2)) {
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                for (option in pair) row.addView(option,
+                    LinearLayout.LayoutParams(0, chipTheme.dp(58), 1f).apply {
+                        rightMargin = chipTheme.dp(8)
+                        bottomMargin = chipTheme.dp(8)
+                    })
+                if (pair.size == 1) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                container.addView(row)
+            }
+        }
+        val commonChecks = bringSuggestions.associateWith { suggestion ->
+            chip(suggestion, activeItems.any { it.getString("name").equals(suggestion, ignoreCase = true) })
+        }
+        val commonGrid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; form.addView(this) }
+        addChipRows(commonGrid, commonChecks.values.toList())
+        val addOns = field("Add-ons · one personal item per line",
+            activeItems.filter { item -> bringSuggestions.none { it.equals(item.getString("name"), ignoreCase = true) } }
+                .joinToString("\n") { it.getString("name") })
+        addOns.minLines = 2
+        val onceSelected = activeItems.filter { it.optLong("onlyDay", -1) == editingDay }
+            .map { it.getString("name").lowercase() }.toMutableSet()
+        val once = CheckBox(this).apply {
+            text = "Remind once only"
+            isChecked = onceSelected.isNotEmpty()
+            form.addView(this)
+        }
+        val onceChoices = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; form.addView(this) }
+        fun selectedNames(): List<String> {
+            val names = linkedMapOf<String, String>()
+            for ((name, check) in commonChecks) if (check.isChecked) names[name.lowercase()] = name
+            for (name in addOns.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() })
+                if (!names.containsKey(name.lowercase())) names[name.lowercase()] = name
+            return names.values.toList()
+        }
+        fun refreshOnceChoices() {
+            onceChoices.removeAllViews()
+            if (!once.isChecked) return
+            text(onceChoices, "Choose which selected items apply only to this occurrence", 13f)
+            val options = selectedNames().map { name ->
+                val key = name.lowercase()
+                chip(name, key in onceSelected).apply {
+                    setOnCheckedChangeListener { _, checked ->
+                        styleChip(this)
+                        if (checked) onceSelected.add(key) else onceSelected.remove(key)
+                    }
+                }
+            }
+            addChipRows(onceChoices, options)
+        }
+        once.setOnCheckedChangeListener { _, _ -> refreshOnceChoices() }
+        for (check in commonChecks.values) check.setOnCheckedChangeListener { _, _ ->
+            styleChip(check)
+            refreshOnceChoices()
+        }
+        addOns.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { refreshOnceChoices() }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+        refreshOnceChoices()
         val oldTasks = original?.optJSONArray("tasks") ?: JSONArray()
         val prep = field("Add preparation task (one-time, due before this event)", "")
         val duration = field("Preparation minutes", "60")
-        // TODO(PDF p16): no per-event reminder-setting callbacks; retain this editor's exact fields and save handler.
         val dialog = PackBackDialog.Builder(this).presentation(PackBackDialog.Layout.Event).setTitle(if (original == null) "Add event" else "Edit event")
             .setView(ScrollView(this).apply { addView(form) }).setPositiveButton("Save", null).setNegativeButton("Cancel", null)
         if (original != null && onSave == null) dialog.setNeutralButton("Delete") { _, _ ->
@@ -674,11 +809,25 @@ class MainActivity : Activity() {
                         .put("end", LocalDateTime.parse("${day.text}T${end.text}").toEpochSecond(ZoneOffset.UTC) / 60)
                         .put("location", location.text.toString()).put("repeatDays", intArrayOf(0, 1, 7)[repeat.selectedItemPosition])
                     val itemArray = JSONArray()
-                    for (name in items.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()) {
+                    val oneTimeDay = if (occurrenceStart != null && date != null &&
+                        LocalDate.parse(day.text.toString()) == date.toLocalDate()) editingDay
+                        else LocalDate.parse(day.text.toString()).toEpochDay()
+                    val selected = selectedNames()
+                    require(selected.size <= 50) { "Select no more than 50 items for one event." }
+                    require(selected.all { it.length <= 80 }) { "Keep item names within 80 characters." }
+                    for (name in selected) {
                         var existing: JSONObject? = null
-                        for (i in 0 until oldItems.length()) if (oldItems.getJSONObject(i).getString("name") == name) existing = oldItems.getJSONObject(i)
-                        itemArray.put(existing ?: JSONObject().put("id", UUID.randomUUID().toString()).put("name", name).put("importance", 0.8)
-                            .put("onlyDay", if (once.isChecked) LocalDate.parse(day.text).toEpochDay() else -1))
+                        for (item in activeItems) if (item.getString("name").equals(name, ignoreCase = true)) existing = item
+                        val copy = existing?.let { JSONObject(it.toString()) }
+                            ?: JSONObject().put("id", UUID.randomUUID().toString()).put("importance", 0.8)
+                        copy.put("name", name).put("onlyDay", if (once.isChecked && name.lowercase() in onceSelected) oneTimeDay else -1)
+                        itemArray.put(copy)
+                    }
+                    // Editing one occurrence must not erase items scoped to other dates.
+                    for (i in 0 until oldItems.length()) {
+                        val item = oldItems.getJSONObject(i)
+                        if (item.optLong("onlyDay", -1) >= 0 && item.optLong("onlyDay") != editingDay)
+                            itemArray.put(item)
                     }
                     event.put("items", itemArray)
                     val taskArray = JSONArray(oldTasks.toString())
@@ -688,9 +837,11 @@ class MainActivity : Activity() {
                     if (onSave != null) { onSave(event); shown.dismiss(); return@setOnClickListener }
                     val result = store.execute(JSONObject().put("action", "save_event").put("event", event))
                     state = result.getJSONObject("state")
-                    Reminders.schedule(this, result.getJSONObject("view").getJSONArray("notifications"))
+                    currentView = result.getJSONObject("view")
+                    Reminders.schedule(this, currentView.getJSONArray("notifications"))
                     syncEvents()
-                    render(result.getJSONObject("view")); shown.dismiss()
+                    saveAddOnMemories(event, selected)
+                    render(currentView); shown.dismiss()
                 } catch (error: Exception) { Toast.makeText(this, error.message ?: "Check the entered values", Toast.LENGTH_LONG).show() }
             }
         }

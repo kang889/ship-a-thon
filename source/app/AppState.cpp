@@ -65,6 +65,7 @@ AppState::AppState(const Json &saved, const Weights &weights, const Json &templa
 
     mWeatherAt = saved.value("weatherAt", Minute{0});
     mWeatherMock = saved.value("weatherMock", false);
+    mUmbrellaPackedDay = saved.value("umbrellaPackedDay", Minute{-1});
     mMemories = saved.value("memories", Json::object());
     if (saved.contains("timing"))
         mTiming = saved.at("timing").get<decltype(mTiming)>();
@@ -89,6 +90,7 @@ Json AppState::Save() const {
             {"hourlyWeather", mHourlyWeather},
             {"weatherAt", mWeatherAt},
             {"weatherMock", mWeatherMock},
+            {"umbrellaPackedDay", mUmbrellaPackedDay},
             {"timing", mTiming},
             {"memories", mMemories}};
 }
@@ -152,7 +154,12 @@ Json AppState::Execute(const Json &command) {
             const auto id = command.at("id").get<std::string>();
             if (text.empty() || text.size() > 8000 || id.empty())
                 throw std::invalid_argument("Enter a note of 1–8000 characters.");
-            mMemories[id] = {{"id", id}, {"text", text}};
+            mMemories[id] = {{"id", id},
+                             {"text", text},
+                             {"course", command.value("course", "")},
+                             {"event_id", command.value("event_id", "")},
+                             {"memory_type", command.value("memory_type", "note")},
+                             {"source", command.value("source", "manual")}};
         } else if (action == "memory_delete")
             mMemories.erase(command.at("id").get<std::string>());
         Json found = Json::array();
@@ -247,6 +254,8 @@ Json AppState::Execute(const Json &command) {
         mRainProbability = -1;
         mWeatherAt = 0;
         mWeatherMock = false;
+    } else if (action == "umbrella_packed") {
+        mUmbrellaPackedDay = command.at("packed").get<bool>() ? now / 1440 : -1;
     } else if (action == "confirm_import") {
         if (!command.value("confirmed", false))
             throw std::invalid_argument("Review and confirm the import before saving.");
@@ -443,7 +452,52 @@ Json AppState::View(Minute now) const {
     const bool umbrella =
         covered && ContextEngine::SuggestUmbrella(relevantRainProbability, upcoming, mWeights);
 
+    Json todayBring = Json::array();
+    if (umbrella) {
+        todayBring.push_back({{"id", "weather-umbrella"},
+                              {"name", "Umbrella"},
+                              {"eventTitle", "Rain before today's last event"},
+                              {"eventStart", 0},
+                              {"occurrence", ""},
+                              {"state", mUmbrellaPackedDay == today ? "PACKED" : "NEEDED"},
+                              {"weather", true}});
+        if (mUmbrellaPackedDay != today) {
+            // A weather check may expire before a later event; notify promptly while it is valid.
+            plans.push_back({{"id", "weather@" + std::to_string(today) + ":bring"},
+                             {"title", "Bring for today"},
+                             {"body", "Bring: Umbrella · rain likely before your last event"},
+                             {"fireAt", now + 1},
+                             {"priority", PriorityName(Priority::High)}});
+        }
+    }
+    for (const auto &occurrence : TimetableEngine::Between(mEvents, today, today)) {
+        for (const auto &item : occurrence.event.items) {
+            if (item.onlyDay >= 0 && item.onlyDay != today)
+                continue;
+            const auto state = State(occurrence, item);
+            Json actions = Json::array();
+            for (const auto target :
+                 {ItemState::Packed, ItemState::Brought, ItemState::InUse, ItemState::NeedsToReturn,
+                  ItemState::Safe, ItemState::Forgotten, ItemState::NotNeeded})
+                if (ItemLifecycleEngine::CanTransition(state, target))
+                    actions.push_back(target);
+            todayBring.push_back({{"id", item.id},
+                                  {"name", item.name},
+                                  {"eventTitle", occurrence.event.title},
+                                  {"eventStart", occurrence.start},
+                                  {"occurrence", occurrence.key},
+                                  {"state", state},
+                                  {"priority", PriorityName(ReminderDecisionEngine::Classify(
+                                                   Risk(occurrence, item, now), mWeights))},
+                                  {"actions", actions},
+                                  {"weather", false}});
+        }
+    }
+    std::sort(plans.begin(), plans.end(),
+              [](const auto &a, const auto &b) { return a.at("fireAt") < b.at("fireAt"); });
+
     return {{"events", events},
+            {"todayBring", todayBring},
             {"tasks", tasks},
             {"notifications", plans},
 
