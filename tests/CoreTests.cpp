@@ -73,6 +73,76 @@ int main(int argc, char **argv) {
         timing[1] = {10, 2};
         Check(AdaptiveTiming::Preferred(timing, 5, 15, 60) == 20, "adaptive timing");
         Check(AdaptiveTiming::Preferred(timing, 5, 30, 60) == 90, "minimum lead");
+
+        // --- NotificationPlanEngine: focused unit coverage of plan assembly ---
+        {
+            const Minute planNow = start - 60;
+            // A High-priority bring and a High-priority return both fire in the future.
+            OccurrenceReminders full{"lab@20000",    "Programming Lab",        "Charger, Laptop", "Charger",
+                                     "Bring: ",      "Before you go, check: ", start - 30,        start + 90,
+                                     Priority::High, Priority::VeryHigh};
+            auto plans = NotificationPlanEngine::Build({full}, {}, planNow);
+            Check(plans.size() == 2, "bring and bring-back plans generated");
+            Check(plans[0].id == "lab@20000:bring" && plans[0].fireAt == start - 30,
+                  "bring plan id and fire time");
+            Check(plans[0].body == "Bring: Charger, Laptop" && plans[0].priority == Priority::High,
+                  "bring body bundles items and keeps priority");
+            Check(plans[1].id == "lab@20000:return" && plans[1].fireAt == start + 90 &&
+                      plans[1].body == "Before you go, check: Charger" &&
+                      plans[1].priority == Priority::VeryHigh,
+                  "bring-back plan preserves fire time, body and priority");
+            Check(plans[0].fireAt <= plans[1].fireAt, "plans ordered by fire time");
+
+            // Empty item lists must never create a spurious notification.
+            OccurrenceReminders empty = full;
+            empty.bringItems = "";
+            empty.backItems = "";
+            Check(NotificationPlanEngine::Build({empty}, {}, planNow).empty(),
+                  "no plan for empty bring/return lists");
+
+            // Below-High priority is suppressed (checklist only, not a notification).
+            OccurrenceReminders low = full;
+            low.backItems = "";
+            low.bringPriority = Priority::Medium;
+            Check(NotificationPlanEngine::Build({low}, {}, planNow).empty(),
+                  "medium priority does not become a notification");
+
+            // A fire time already in the past is dropped.
+            OccurrenceReminders past = full;
+            past.backItems = "";
+            past.bringFireAt = planNow - 1;
+            Check(NotificationPlanEngine::Build({past}, {}, planNow).empty(), "past bring reminder dropped");
+
+            // Independent occurrences each yield their own plan, ordered by fire time.
+            OccurrenceReminders earlier = full;
+            earlier.backItems = "";
+            earlier.key = "lab@19999";
+            earlier.bringFireAt = start - 45;
+            OccurrenceReminders laterOcc = full;
+            laterOcc.backItems = "";
+            laterOcc.key = "lab@20001";
+            laterOcc.bringFireAt = start - 10;
+            auto multi = NotificationPlanEngine::Build({laterOcc, earlier}, {}, planNow);
+            Check(multi.size() == 2 && multi[0].id == "lab@19999:bring" && multi[1].id == "lab@20001:bring",
+                  "recurring occurrences remain independent and sorted");
+
+            // Adaptive timing feeds the fire time through unchanged.
+            OccurrenceReminders adaptive = full;
+            adaptive.backItems = "";
+            adaptive.bringFireAt = start - AdaptiveTiming::Preferred(timing, 5, 15, 60);
+            Check(NotificationPlanEngine::Build({adaptive}, {}, planNow)[0].fireAt == start - 20,
+                  "adaptive lead determines bring fire time");
+
+            // Umbrella reminder appears only while active and fires promptly.
+            UmbrellaReminder umbrellaActive{true, 20000, planNow + 1, "Bring: Umbrella"};
+            auto withUmbrella = NotificationPlanEngine::Build({}, umbrellaActive, planNow);
+            Check(withUmbrella.size() == 1 && withUmbrella[0].id == "weather@20000:bring" &&
+                      withUmbrella[0].priority == Priority::High && withUmbrella[0].fireAt == planNow + 1,
+                  "active umbrella schedules a high-priority bring reminder");
+            UmbrellaReminder umbrellaPacked{false, 20000, planNow + 1, "Bring: Umbrella"};
+            Check(NotificationPlanEngine::Build({}, umbrellaPacked, planNow).empty(),
+                  "inactive umbrella schedules no reminder");
+        }
         std::vector<WeatherHour> weather{
             {start - 120, 90}, {start - 60, 20}, {start, 30}, {start + 60, 80}, {start + 120, 40}};
 
