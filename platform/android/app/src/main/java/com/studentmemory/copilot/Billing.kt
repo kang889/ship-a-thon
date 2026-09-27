@@ -1,14 +1,15 @@
 package com.studentmemory.copilot
 
 import android.app.Activity
-import android.app.AlertDialog
+import com.studentmemory.copilot.ui.PackBackDialog as AlertDialog
 import com.revenuecat.purchases.*
 import com.studentmemory.copilot.services.Account
 
 object Billing {
     fun show(activity: Activity) {
         if (BuildConfig.REVENUECAT_PUBLIC_KEY.isBlank()) {
-            AlertDialog.Builder(activity).setTitle("Student Memory Pro")
+            // Presentation only: never invent a price or offering when RevenueCat is unconfigured.
+            AlertDialog.Builder(activity).presentation(AlertDialog.Layout.Pro).setTitle("Free remembers your day.\nPro learns how you forget.")
                 .setMessage("Free remembers your day. Pro learns how you forget.\n\nPurchases are not configured in this demo. All offline essentials remain free.")
                 .setPositiveButton("OK", null).show()
             return
@@ -24,7 +25,7 @@ object Billing {
         Purchases.sharedInstance.getOfferingsWith(onError = { message(activity, it.message) }) { offerings ->
             val packages = offerings.current?.availablePackages.orEmpty()
             val labels = packages.map { "${it.product.title} · ${it.product.price.formatted}" }.toTypedArray()
-            AlertDialog.Builder(activity).setTitle("Student Memory Pro").setItems(labels) { _, index ->
+            AlertDialog.Builder(activity).presentation(AlertDialog.Layout.Pro).setTitle("Free remembers your day.\nPro learns how you forget.").setItems(labels) { _, index ->
                 Purchases.sharedInstance.purchaseWith(PurchaseParams.Builder(activity, packages[index]).build(),
                     onError = { error, cancelled -> if (!cancelled) message(activity, error.message) },
                     onSuccess = { _, info -> message(activity, if (info.entitlements["pro"]?.isActive == true) "Pro is active" else "Purchase received. Entitlement is pending.") })

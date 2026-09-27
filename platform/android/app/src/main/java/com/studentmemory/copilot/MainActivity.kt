@@ -2,9 +2,13 @@ package com.studentmemory.copilot
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
+import com.studentmemory.copilot.ui.PackBackDialog as AlertDialog
 import android.content.Intent
 import android.graphics.Color
+import com.studentmemory.copilot.ui.PackBackTheme
+import com.studentmemory.copilot.ui.PackBackComponents
+import com.studentmemory.copilot.ui.Tone
+import com.studentmemory.copilot.ui.PackBackDialog
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -24,8 +28,8 @@ class MainActivity : Activity() {
     private lateinit var content: LinearLayout
     private lateinit var store: CoreStore
     private var state = JSONObject()
-    private val ink = Color.rgb(25, 46, 43)
-    private val green = Color.rgb(25, 101, 76)
+    private val ink get() = PackBackTheme(this).ink
+    private val green get() = PackBackTheme(this).brand
     private var importKind = "timetable"
     private var importEventId = ""
     // Session-only identity token. No private service keys are accepted by this client.
@@ -53,93 +57,143 @@ class MainActivity : Activity() {
         }
     }
     private fun text(parent: LinearLayout, value: String, size: Float = 16f, color: Int = ink): TextView {
-        return TextView(this).apply {
-            text = value; textSize = size; setTextColor(color); setPadding(0, 8, 0, 8)
+        return PackBackComponents(this).Label(value, size, size >= 22f, color).apply {
+            setPadding(0, PackBackTheme(this@MainActivity).dp(8), 0, PackBackTheme(this@MainActivity).dp(8))
             parent.addView(this)
         }
     }
     private fun button(parent: LinearLayout, title: String, action: () -> Unit) {
-        parent.addView(Button(this).apply {
-            text = title; isAllCaps = false; setTextColor(green); minHeight = 48
-            setOnClickListener { action() }
-        })
+        parent.addView(PackBackComponents(this).SecondaryButton(title, action))
     }
-    private fun column(parent: LinearLayout): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL; setPadding(24, 20, 24, 20)
-        setBackgroundColor(Color.WHITE)
-        parent.addView(this, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 10, 0, 10) })
-    }
+    private fun column(parent: LinearLayout): LinearLayout = PackBackComponents(this).Card().also { parent.addView(it) }
     private fun time(minute: Long) = LocalDateTime.ofEpochSecond(minute * 60, 0, ZoneOffset.UTC)
         .format(DateTimeFormatter.ofPattern("EEE d MMM · HH:mm"))
     private fun render(view: JSONObject) {
-        content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(28, 44, 28, 28)
-            setBackgroundColor(Color.rgb(242, 246, 241))
+        val events = view.getJSONArray("events")
+        val returning = !showWeek && events.length() > 0 && events.getJSONObject(0).getString("phase") == "BRING BACK"
+        val palette = PackBackTheme(this, returning)
+        val ui = PackBackComponents(this, palette)
+        val root = ui.Column().apply { setBackgroundColor(palette.background) }
+        root.setOnApplyWindowInsetsListener { target, insets ->
+            target.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+            insets
         }
-        setContentView(ScrollView(this).apply { addView(content) })
-        text(content, "STUDENT MEMORY", 12f, green)
-        text(content, "A little less to remember.", 30f)
-        text(content, "Bring it. Do it. Bring it back.", 16f)
-        text(content, "Offline edition · your day stays on this device", 12f)
+        content = ui.Column().apply { setPadding(palette.dp(20),palette.dp(20),palette.dp(20),palette.dp(24)) }
+        root.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(content) }, LinearLayout.LayoutParams(-1,0,1f))
+        root.addView(ui.BottomNav(null, { manage() }, { edit(null) }, { memory() }))
+        setContentView(root)
+        window.statusBarColor = palette.background
+        window.navigationBarColor = palette.card
+        window.decorView.systemUiVisibility = if (palette.dark || returning) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+
+        // TODO(PDF p8/19): no display-name binding or timed weather forecast exists. Omit sample identity and forecast time.
+        val almost = events.length() > 0 && events.getJSONObject(0).getString("phase") == "NEXT"
+        if (!returning) {
+            content.addView(ui.Label(if (almost) "Almost time." else "Good morning.",32f,true,weight=700))
+            ui.Space(content,8)
+            content.addView(ui.Label(LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE · d MMMM")),13f,color=palette.muted))
+        }
+        if (view.optBoolean("umbrella")) {
+            ui.Space(content,12)
+            content.addView(ui.Pill("Rain likely" + if(view.optBoolean("weatherMock")) " · demo weather" else "",Tone.AI))
+        }
+        if (events.length() > 1) button(content, if (showWeek) "Focus on next event" else "Show upcoming week") {
+            showWeek = !showWeek; render(view)
+        }
+        if (events.length() == 0) {
+            ui.Space(content,96)
+            content.addView(ui.IconTile("bag",Tone.Brand,104).apply { layoutParams = LinearLayout.LayoutParams(palette.dp(104),palette.dp(104)).apply { gravity=android.view.Gravity.CENTER_HORIZONTAL } })
+            ui.Space(content,24)
+            content.addView(ui.Label("Nothing to bring today.",24f,true,weight=700).apply { gravity=android.view.Gravity.CENTER })
+            ui.Space(content,12)
+            content.addView(ui.Label("Add a class, then tell us what you need to bring.",16f,color=palette.secondary).apply { gravity=android.view.Gravity.CENTER })
+            ui.Space(content,56)
+            // TODO(PDF p19): no next-week summary is returned for an empty event list. Do not invent Monday's class.
+        }
+        for (i in 0 until if (showWeek) events.length() else minOf(events.length(), 1)) {
+            val event = events.getJSONObject(i)
+            val items = event.getJSONArray("items")
+            val back = event.getString("phase") == "BRING BACK"
+            val eventStart = LocalDateTime.ofEpochSecond(event.getLong("start") * 60,0,ZoneOffset.UTC)
+            val remaining = event.getLong("start") - LocalDateTime.now().toEpochSecond(ZoneOffset.UTC) / 60
+            val countdown = if (remaining > 0) "Starts in " + if (remaining >= 60) "${remaining / 60}h ${remaining % 60}m" else "${remaining} min" else null
+            if (back && returning) {
+                content.addView(ui.Pill(event.getString("title"),Tone.Grey)); ui.Space(content,30)
+                content.addView(ui.SectionHeader("Bring back"))
+                content.addView(ui.Label("Before\nyou go.",44f,true,weight=800)); ui.Space(content,12)
+                content.addView(ui.Label("Make sure everything leaves with you.",16f,color=palette.secondary)); ui.Space(content,28)
+            } else {
+                content.addView(ui.NextClassHeroCard(event.getString("title"),eventStart.format(DateTimeFormatter.ofPattern("h:mm a")),
+                    event.getString("location"),countdown,event.getString("phase") == "NEXT",findEvent(event.getString("id"))?.optString("course")))
+                var packed = 0
+                for (j in 0 until items.length()) if (items.getJSONObject(j).getString("state") in setOf("PACKED","BROUGHT","IN_USE","NEEDS_TO_RETURN","SAFE")) packed++
+                content.addView(ui.SectionHeader("Bring", "$packed of ${items.length()} packed"))
+            }
+            if (event.getBoolean("overlap")) content.addView(ui.Pill("Overlaps another event",Tone.Warning))
+            if (items.length() == 0) content.addView(ui.Label("Add your essentials using Edit event.",14f,color=palette.muted))
+            for (j in 0 until items.length()) {
+                val item = items.getJSONObject(j)
+                val actions = item.getJSONArray("actions")
+                val updateItem: (() -> Unit)? = if (actions.length() > 0) ({
+                    val labels = Array(actions.length()) { actions.getString(it).replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() } }
+                    PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(item.getString("reason")).setItems(labels) { _, index ->
+                        run(JSONObject().put("action", "transition").put("occurrence", event.getString("key"))
+                            .put("item", item.getString("id")).put("target", actions.getString(index)))
+                    }.show()
+                }) else null
+                val highRisk = item.getString("priority") in setOf("HIGH","VERY HIGH")
+                val itemState = item.getString("state")
+                if (returning && back) content.addView(ui.BringBackCard(item.getString("name"),item.getString("reason"),highRisk,itemState == "SAFE",updateItem))
+                else content.addView(ui.ItemRow(item.getString("name"),itemState.replace('_',' ').lowercase().replaceFirstChar { it.uppercase() },
+                    item.getString("reason"),highRisk,itemState in setOf("PACKED","BROUGHT","IN_USE","NEEDS_TO_RETURN","SAFE"),updateItem))
+            }
+            if (returning) {
+                var safeCount=0
+                for (j in 0 until items.length()) if(items.getJSONObject(j).getString("state") == "SAFE") safeCount++
+                ui.Space(content,28); content.addView(ui.SectionHeader("$safeCount of ${items.length()} with you",event.getString("location")))
+                content.addView(ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply {
+                    max=items.length().coerceAtLeast(1); progress=safeCount
+                    progressTintList=android.content.res.ColorStateList.valueOf(palette.safe)
+                    progressBackgroundTintList=android.content.res.ColorStateList.valueOf(palette.line)
+                },LinearLayout.LayoutParams(-1,palette.dp(5)))
+                // TODO(PDF p10–14): no bulk-return, forgot-location, snooze, dedicated WAIT or explanation-route callbacks.
+                // Existing per-item transition menu remains the sole handler; never synthesize a SAFE transition.
+            }
+            button(content, "Edit event") { edit(findEvent(event.getString("id"))) }
+        }
+        val tasks = view.getJSONArray("tasks")
+        if (tasks.length() > 0) content.addView(ui.SectionHeader("Do before class"))
+        for (i in 0 until tasks.length()) {
+            val task = tasks.getJSONObject(i)
+            val card = ui.Card(); content.addView(card)
+            val taskHeader = ui.Row(); taskHeader.addView(ui.IconTile("document",Tone.Warning))
+            taskHeader.addView(ui.Label(task.getString("title"),18f,true,weight=700).apply { setPadding(palette.dp(12),0,0,0) },LinearLayout.LayoutParams(0,-2,1f)); card.addView(taskHeader)
+            ui.Space(card,12)
+            card.addView(ui.Label("${task.getInt("duration")} minutes · due ${time(task.getLong("deadline"))}",13f,color=palette.muted))
+            ui.Space(card,8)
+            card.addView(ui.Label(if (task.isNull("slot")) "No free slot before the deadline. Adjust your schedule."
+                else "Suggested start: ${time(task.getLong("slot"))}",14f,color=palette.secondary))
+            button(card, "Completed") {
+                run(JSONObject().put("action", "complete_task").put("event", task.getString("event"))
+                    .put("task", task.getString("id")).put("completed", true))
+            }
+            // TODO(PDF p18): alternative preparation slots, start/pause and rescheduling callbacks do not exist.
+        }
+        if(events.length()==0) ui.Space(content,100)
+        content.addView(ui.SectionHeader("Your tools"))
+        // Existing routes/callbacks stay available. No Profile/onboarding route is added by this reskin.
         button(content, "+ Add a class or event") { edit(null) }
         button(content, "Manage timetable") { manage() }
         button(content, "Import timetable or instruction") { chooseImport() }
         button(content, "Student Memory Pro") { Billing.show(this) }
         button(content, "Weather context") { weather() }
         button(content, "Student memory") { memory() }
-        if (view.optBoolean("umbrella")) text(column(content),
-            "Bring an umbrella · rain is likely" + if (view.optBoolean("weatherMock")) " (demo weather)" else "", 18f)
         if (Account.configured) button(content, "Sign in / create account") { signIn() }
         if (BuildConfig.BACKEND_URL.isNotBlank()) button(content, "Connect backend session") {
             val input = EditText(this).apply { hint = "Firebase identity token (or local development token)" }
             AlertDialog.Builder(this).setTitle("Connect session").setView(input)
                 .setPositiveButton("Connect") { _, _ -> identityToken = input.text.toString().trim() }
                 .setNegativeButton("Cancel", null).show()
-        }
-        val events = view.getJSONArray("events")
-        if (events.length() > 1) button(content, if (showWeek) "Focus on next event" else "Show upcoming week") {
-            showWeek = !showWeek; render(view)
-        }
-        if (events.length() == 0) {
-            text(column(content), "Your day starts here. Add a class, then tell us what you need to bring.", 20f)
-        }
-        for (i in 0 until if (showWeek) events.length() else minOf(events.length(), 1)) {
-            val event = events.getJSONObject(i)
-            val card = column(content)
-            text(card, event.getString("phase"), 12f, green)
-            text(card, event.getString("title"), 23f)
-            text(card, time(event.getLong("start")) + "\n" + event.getString("location"), 14f)
-            if (event.getBoolean("overlap")) text(card, "Overlaps another event", 14f, Color.rgb(166, 73, 29))
-            val items = event.getJSONArray("items")
-            if (items.length() == 0) text(card, "Add your essentials using Edit event.", 14f)
-            for (j in 0 until items.length()) {
-                val item = items.getJSONObject(j)
-                text(card, item.getString("name") + " · " + item.getString("state").replace('_', ' '), 18f)
-                text(card, item.getString("priority") + " · " + item.getString("reason"), 12f)
-                val actions = item.getJSONArray("actions")
-                if (actions.length() > 0) button(card, "Update " + item.getString("name")) {
-                    val labels = Array(actions.length()) { actions.getString(it).replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() } }
-                    AlertDialog.Builder(this).setTitle(item.getString("name")).setItems(labels) { _, index ->
-                        run(JSONObject().put("action", "transition").put("occurrence", event.getString("key"))
-                            .put("item", item.getString("id")).put("target", actions.getString(index)))
-                    }.show()
-                }
-            }
-            button(card, "Edit event") { edit(findEvent(event.getString("id"))) }
-        }
-        val tasks = view.getJSONArray("tasks")
-        if (tasks.length() > 0) text(content, "DO · Make room to prepare", 22f)
-        for (i in 0 until tasks.length()) {
-            val task = tasks.getJSONObject(i)
-            val card = column(content)
-            text(card, task.getString("title"), 20f)
-            text(card, "${task.getInt("duration")} minutes · due ${time(task.getLong("deadline"))}", 13f)
-            text(card, if (task.isNull("slot")) "No free slot before the deadline. Adjust your schedule."
-                else "Suggested start: ${time(task.getLong("slot"))}", 14f)
-            button(card, "Completed") {
-                run(JSONObject().put("action", "complete_task").put("event", task.getString("event"))
-                    .put("task", task.getString("id")).put("completed", true))
-            }
         }
     }
     private fun findEvent(id: String): JSONObject? {
@@ -148,7 +202,8 @@ class MainActivity : Activity() {
         return null
     }
     private fun chooseImport() {
-        AlertDialog.Builder(this).setTitle("Import")
+        // TODO(PDF p17): plus retains edit(null); unsupported event/task categories are not new routes.
+        AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Import).setTitle("Import")
             .setItems(arrayOf("Timetable screenshot", "Lecturer instruction")) { _, index ->
                 importKind = if (index == 0) "timetable" else "instruction"
                 if (index == 0) chooseInput() else {
@@ -162,7 +217,7 @@ class MainActivity : Activity() {
             }.show()
     }
     private fun chooseInput() {
-        AlertDialog.Builder(this).setTitle(if (BuildConfig.BACKEND_URL.isBlank()) "Demo extraction · sample results, no AI calls" else "Extract once, review before saving")
+        AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Import).setTitle(if (BuildConfig.BACKEND_URL.isBlank()) "Demo extraction · sample results, no AI calls" else "Extract once, review before saving")
             .setItems(arrayOf("Choose screenshot", "Paste text")) { _, index ->
                 if (index == 0) startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     type = "image/*"; putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/png", "image/jpeg"))
@@ -170,7 +225,7 @@ class MainActivity : Activity() {
                 }, 100)
                 else {
                     val input = EditText(this).apply { hint = "Paste the timetable or instruction"; minLines = 4 }
-                    AlertDialog.Builder(this).setTitle("Paste text").setView(input)
+                    AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Import).setTitle("Paste text").setView(input)
                         .setPositiveButton("Preview") { _, _ -> extract(JSONObject().put("text", input.text.toString())) }
                         .setNegativeButton("Cancel", null).show()
                 }
@@ -233,8 +288,8 @@ class MainActivity : Activity() {
             for (j in 0 until tasks.length()) summary.append("Do: ").append(tasks.getJSONObject(j).getString("title")).append("\n")
             summary.append("\n")
         }
-        AlertDialog.Builder(this).setTitle(if (result.getBoolean("mock")) "DEMO · sample results, not your image" else "Review extracted details")
-            .setMessage(summary.toString()).setNegativeButton("Discard", null)
+        AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Import).setTitle(if (result.getBoolean("mock")) "DEMO · sample results, not your image" else if(result.has("source_text")) "Lecturer message" else "Review timetable")
+            .setCards(summary.toString().split("\n\n").filter { it.isNotBlank() }).setNegativeButton("Discard", null)
             .setNeutralButton("Edit details") { _, _ ->
                 AlertDialog.Builder(this).setTitle("Edit before confirming")
                     .setItems(Array(proposed.length()) { proposed.getJSONObject(it).getString("title") }) { _, index ->
@@ -292,14 +347,15 @@ class MainActivity : Activity() {
     }
     private fun memory() {
         val input = EditText(this).apply { hint = "Write a note, or ask what you need tomorrow"; minLines = 3 }
-        AlertDialog.Builder(this).setTitle("Student memory").setView(input)
+        // TODO(PDF p21–23): no recent-memory fetch or source/date binding in this existing search flow.
+        AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Memory).setTitle("Memory").setView(input)
             .setPositiveButton("Search") { _, _ ->
                 memoryRequest("/memory/search", JSONObject().put("query", input.text.toString())) { result ->
                     val memories = result.getJSONArray("memories")
-                    AlertDialog.Builder(this).setTitle(if (result.optBoolean("mock")) "Demo keyword search" else "Relevant memories")
+                    AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Memory).setTitle(if (result.optBoolean("mock")) "Demo keyword search" else "Relevant memories")
                         .setItems(Array(memories.length()) { memories.getJSONObject(it).getString("text") }) { _, index ->
                             val selected = memories.getJSONObject(index)
-                            AlertDialog.Builder(this).setMessage(selected.getString("text")).setPositiveButton("Close", null)
+                            AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Memory).setTitle("Memory").setCards(listOf(selected.getString("text"))).setPositiveButton("Close", null)
                                 .setNeutralButton("Delete") { _, _ -> deleteMemory(selected.getString("id")) }.show()
                         }.setPositiveButton("Close", null).show()
                 }
@@ -353,8 +409,11 @@ class MainActivity : Activity() {
     private fun manage() {
         val events = state.optJSONArray("events") ?: JSONArray()
         if (events.length() == 0) { edit(null); return }
-        AlertDialog.Builder(this).setTitle("Your timetable")
-            .setItems(Array(events.length()) { events.getJSONObject(it).getString("title") }) { _, index -> edit(events.getJSONObject(index)) }.show()
+        // TODO(PDF p15): the existing timetable chooser has no selected-day callback or free-window data.
+        PackBackDialog.Builder(this).presentation(PackBackDialog.Layout.Schedule).setTitle("Your timetable")
+            .setItems(Array(events.length()) { events.getJSONObject(it).let { event ->
+                event.getString("title") + "\n" + time(event.getLong("start")) + "\n" + event.optString("location")
+            } }) { _, index -> edit(events.getJSONObject(index)) }.show()
     }
     private fun edit(original: JSONObject?, onSave: ((JSONObject) -> Unit)? = null) {
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 12, 28, 12) }
@@ -382,7 +441,8 @@ class MainActivity : Activity() {
         val oldTasks = original?.optJSONArray("tasks") ?: JSONArray()
         val prep = field("Add preparation task (one-time, due before this event)", "")
         val duration = field("Preparation minutes", "60")
-        val dialog = AlertDialog.Builder(this).setTitle(if (original == null) "Add event" else "Edit event")
+        // TODO(PDF p16): no per-event reminder-setting callbacks; retain this editor's exact fields and save handler.
+        val dialog = PackBackDialog.Builder(this).presentation(PackBackDialog.Layout.Event).setTitle(if (original == null) "Add event" else "Edit event")
             .setView(ScrollView(this).apply { addView(form) }).setPositiveButton("Save", null).setNegativeButton("Cancel", null)
         if (original != null && onSave == null) dialog.setNeutralButton("Delete") { _, _ ->
             AlertDialog.Builder(this).setTitle("Delete this event and all its occurrences?")
