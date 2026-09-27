@@ -12,7 +12,9 @@ services:
       QDRANT_URL: http://qdrant:6333
       DEV_TOKEN: ${DEV_TOKEN:-local-development-only}
       ENABLE_PAID_AI: ${ENABLE_PAID_AI:-false}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gpt-4.1-mini}
+      MEMORY_MODE: ${MEMORY_MODE:-semantic}
       DAILY_USER_AI_CALLS: ${DAILY_USER_AI_CALLS:-5}
       DAILY_GLOBAL_AI_CALLS: ${DAILY_GLOBAL_AI_CALLS:-50}
     depends_on:

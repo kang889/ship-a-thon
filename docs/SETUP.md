@@ -53,6 +53,8 @@ Compose starts the backend, PostgreSQL and Qdrant. Only the backend is exposed, 
 
 ## Add your keys later
 
+For the simplest OpenAI setup, follow [OPENAI_SETUP.md](OPENAI_SETUP.md). This supports extraction without Qdrant or Firebase during local development.
+
 ### Backend modes
 
 Exactly three modes are supported:
@@ -70,13 +72,13 @@ To enable real extraction, set these **server environment variables**:
 ```dotenv
 APP_MODE=LOCAL
 ENABLE_PAID_AI=true
-GEMINI_API_KEY=your-server-secret
-AI_MODEL=gemini-2.5-flash-lite
+OPENAI_API_KEY=your-server-secret
+AI_MODEL=gpt-4.1-mini
 DAILY_USER_AI_CALLS=5
 DAILY_GLOBAL_AI_CALLS=50
 ```
 
-Never put the Gemini key into Android. Production additionally requires `DATABASE_URL` beginning with `postgresql`, `FIREBASE_PROJECT_ID`, Google application credentials via `GOOGLE_APPLICATION_CREDENTIALS`, and `QDRANT_API_KEY`. Place the backend behind HTTPS; the Android client refuses plaintext connections. Keep PostgreSQL/Qdrant private. Use one backend worker for cache coalescing; quota counters remain atomic across workers, but identical requests could still be paid for twice across separate workers.
+Never put the OpenAI key into Android. Production additionally requires `DATABASE_URL` beginning with `postgresql`, `FIREBASE_PROJECT_ID`, Google application credentials via `GOOGLE_APPLICATION_CREDENTIALS`, and `QDRANT_API_KEY`. Place the backend behind HTTPS; the Android client refuses plaintext connections. Keep PostgreSQL/Qdrant private. Use one backend worker for cache coalescing; quota counters remain atomic across workers, but identical requests could still be paid for twice across separate workers.
 
 ### Android public configuration
 
@@ -129,4 +131,4 @@ Notifications use battery-friendly inexact alarms. Android may delay them, and o
 - JSON/UTF-8 byte arrays cross JNI. Native exceptions become error responses; failed commands never overwrite saved state. Android's `AtomicFile` retains the previous state if a write fails.
 - Native Android widgets are used for this first shell; SDL/OpenGL is unnecessary for these forms/checklists.
 - Backend records are scoped by authenticated identity. Vector IDs include that identity, and every vector search applies the user filter.
-- [Gemini structured output](https://ai.google.dev/gemini-api/docs/generate-content/structured-output), [Firebase Android authentication](https://firebase.google.com/docs/auth/android/start), [RevenueCat Android SDK](https://www.revenuecat.com/docs/getting-started/installation/android).
+- [OpenAI structured output](https://developers.openai.com/api/docs/guides/structured-outputs), [Firebase Android authentication](https://firebase.google.com/docs/auth/android/start), [RevenueCat Android SDK](https://www.revenuecat.com/docs/getting-started/installation/android).

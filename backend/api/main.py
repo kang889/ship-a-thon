@@ -40,7 +40,9 @@ def create_app(settings=None, provider=None, memory_service=None):
     )
     extraction = ExtractionService(repo, provider, settings)
     memories = memory_service or (
-        FakeMemory(repo) if settings.mode == "MOCK" else SemanticMemory(repo, settings)
+        FakeMemory(repo)
+        if settings.mode == "MOCK" or settings.memory_mode == "lexical"
+        else SemanticMemory(repo, settings)
     )
     weather = WeatherService(mock=settings.mode == "MOCK")
     app = FastAPI(
@@ -163,14 +165,14 @@ def create_app(settings=None, provider=None, memory_service=None):
     def store_memory(body: MemoryRecord, user: str = user_dependency):
         entitlements.require_pro(user)
         memories.put(user, body)
-        return {"id": body.id, "mock": settings.mode == "MOCK"}
+        return {"id": body.id, "mock": settings.mode == "MOCK" or settings.memory_mode == "lexical"}
 
     @app.post("/api/v1/memory/search")
     def search(body: SearchRequest, user: str = user_dependency):
         entitlements.require_pro(user)
         return {
             "memories": memories.search(user, body.query, body.course, body.limit),
-            "mock": settings.mode == "MOCK",
+            "mock": settings.mode == "MOCK" or settings.memory_mode == "lexical",
         }
 
     @app.delete("/api/v1/memory/{memory_id}", status_code=204)
