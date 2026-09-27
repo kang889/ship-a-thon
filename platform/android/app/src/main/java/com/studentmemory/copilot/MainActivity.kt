@@ -113,6 +113,9 @@ class MainActivity : Activity() {
     }
     private fun time(minute: Long) = LocalDateTime.ofEpochSecond(minute * 60, 0, ZoneOffset.UTC)
         .format(DateTimeFormatter.ofPattern("EEE d MMM · HH:mm"))
+    // Never surface a null or blank failure message to the user; fall back to a readable line.
+    private fun friendly(error: Throwable, fallback: String): String =
+        error.message?.trim()?.takeIf { it.isNotEmpty() } ?: fallback
     private fun render(view: JSONObject) {
         val events = view.getJSONArray("events")
         val returning = !showWeek && events.length() > 0 && events.getJSONObject(0).getString("phase") == "BRING BACK"
@@ -328,7 +331,9 @@ class MainActivity : Activity() {
             require(bytes.size <= 2_000_000) { "Choose an image smaller than 2 MB" }
             extract(JSONObject().put("image_base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
                 .put("mime_type", contentResolver.getType(uri) ?: "image/png"))
-        } catch (error: Exception) { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() }
+        } catch (error: Exception) {
+            Toast.makeText(this, friendly(error, "Couldn't read that image. Try another screenshot."), Toast.LENGTH_LONG).show()
+        }
     }
     private fun extract(input: JSONObject) {
         val kind = importKind
@@ -349,7 +354,8 @@ class MainActivity : Activity() {
                 runOnUiThread { preview(result) }
             } catch (error: Exception) {
                 runOnUiThread { AlertDialog.Builder(this).setTitle("Use manual entry")
-                    .setMessage(error.message).setPositiveButton("OK", null).show() }
+                    .setMessage(friendly(error, "We couldn't read this automatically. You can still add it by hand."))
+                    .setPositiveButton("OK", null).show() }
             }
         }.start()
     }
@@ -403,7 +409,8 @@ class MainActivity : Activity() {
                 runOnUiThread { done(result) }
             } catch (error: Exception) {
                 runOnUiThread { AlertDialog.Builder(this).setTitle("Service unavailable")
-                    .setMessage(error.message).setPositiveButton("OK", null).show() }
+                    .setMessage(friendly(error, "We couldn't reach the server. Your offline data still works."))
+                    .setPositiveButton("OK", null).show() }
             }
         }.start()
     }
@@ -617,7 +624,7 @@ class MainActivity : Activity() {
             try {
                 BackendClient(backendToken()).delete("/memory/$id")
                 runOnUiThread { Toast.makeText(this, "Memory deleted", Toast.LENGTH_SHORT).show() }
-            } catch (error: Exception) { runOnUiThread { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() } }
+            } catch (error: Exception) { runOnUiThread { Toast.makeText(this, friendly(error, "Couldn't delete that memory. Please try again."), Toast.LENGTH_LONG).show() } }
         }.start()
     }
     private fun memoryRequest(path: String, body: JSONObject, done: (JSONObject) -> Unit) {
@@ -627,7 +634,7 @@ class MainActivity : Activity() {
             val result = store.execute(command)
             state = result.getJSONObject("state")
             done(result)
-        } catch (error: Exception) { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() }
+        } catch (error: Exception) { Toast.makeText(this, friendly(error, "Couldn't complete that. Please try again."), Toast.LENGTH_LONG).show() }
     }
     private fun saveAddOnMemories(event: JSONObject, selected: List<String>) {
         val items = event.optJSONArray("items") ?: return
@@ -687,7 +694,7 @@ class MainActivity : Activity() {
                     Account.signIn(emailText, passwordText, create)
                     runOnUiThread { Toast.makeText(this, "Signed in", Toast.LENGTH_SHORT).show() }
                 } catch (error: Exception) {
-                    runOnUiThread { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() }
+                    runOnUiThread { Toast.makeText(this, friendly(error, "Sign-in failed. Check your details and connection."), Toast.LENGTH_LONG).show() }
                 }
             }.start()
         }
