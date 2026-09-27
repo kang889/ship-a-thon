@@ -98,8 +98,9 @@ int main(int argc, char **argv) {
             nlohmann::json hours = nlohmann::json::array();
             for (Minute hour = nowWeather; hour <= later.start; hour += 60)
                 hours.push_back({{"time", hour}, {"rain_probability", hour == rainAt ? chance : 0}});
-            return forecastApp.Execute({{"action", "weather"}, {"now", nowWeather},
-                                        {"mock", true}, {"hourly", hours}}).at("view");
+            return forecastApp
+                .Execute({{"action", "weather"}, {"now", nowWeather}, {"mock", true}, {"hourly", hours}})
+                .at("view");
         };
         auto noUmbrella = forecast(60, start + 120);
         Check(noUmbrella["umbrella"] == false && noUmbrella["todayBring"][0]["name"] == "Charger",
@@ -108,17 +109,18 @@ int main(int argc, char **argv) {
         Check(decision["umbrella"] == true && decision["weatherLastEventStart"] == later.start,
               "rain before last event triggers");
         Check(decision["todayBring"][0]["name"] == "Umbrella" &&
-              decision["todayBring"][1]["eventTitle"] == "Programming Lab" &&
-              decision["todayBring"].back()["eventTitle"] == "Evening class",
+                  decision["todayBring"][1]["eventTitle"] == "Programming Lab" &&
+                  decision["todayBring"].back()["eventTitle"] == "Evening class",
               "umbrella precedes event-labelled daily items");
         Check(std::any_of(decision["notifications"].begin(), decision["notifications"].end(),
                           [](const auto &plan) { return plan.at("id") == "weather@20000:bring"; }),
               "rain schedules bring umbrella reminder");
-        auto packedUmbrella = forecastApp.Execute({{"action", "umbrella_packed"},
-                                                   {"now", nowWeather}, {"packed", true}}).at("view");
+        auto packedUmbrella =
+            forecastApp.Execute({{"action", "umbrella_packed"}, {"now", nowWeather}, {"packed", true}})
+                .at("view");
         Check(packedUmbrella["todayBring"][0]["state"] == "PACKED" &&
-              std::none_of(packedUmbrella["notifications"].begin(), packedUmbrella["notifications"].end(),
-                           [](const auto &plan) { return plan.at("id") == "weather@20000:bring"; }),
+                  std::none_of(packedUmbrella["notifications"].begin(), packedUmbrella["notifications"].end(),
+                               [](const auto &plan) { return plan.at("id") == "weather@20000:bring"; }),
               "packed umbrella remains visible without further weather reminder");
         Check(AppState(forecastApp.Save()).View(nowWeather)["todayBring"][0]["state"] == "PACKED",
               "umbrella packed state persists for today");
@@ -132,16 +134,17 @@ int main(int argc, char **argv) {
         Check(AppState().View(nowWeather)["umbrella"] == false, "no event today");
         AppState partialForecast;
         partialForecast.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", later}});
-        auto incomplete = partialForecast.Execute({{"action", "weather"}, {"now", nowWeather},
-            {"hourly", nlohmann::json::array({{{"time", nowWeather + 60}, {"rain_probability", 95}}})}});
+        auto incomplete = partialForecast.Execute(
+            {{"action", "weather"},
+             {"now", nowWeather},
+             {"hourly", nlohmann::json::array({{{"time", nowWeather + 60}, {"rain_probability", 95}}})}});
         Check(incomplete["view"]["umbrella"] == false && incomplete["view"]["weatherCovered"] == false,
               "partial forecast must not guess");
         partialForecast.Execute({{"action", "weather_clear"}, {"now", nowWeather}});
         Check(partialForecast.View(nowWeather)["weatherChecked"] == false, "unavailable clears forecast");
         auto recurring = event;
         recurring.id = "repeat";
-        recurring.items = {{"laptop", "Laptop", .8, -1},
-                           {"shoes", "Shoes", .8, day}};
+        recurring.items = {{"laptop", "Laptop", .8, -1}, {"shoes", "Shoes", .8, day}};
         AppState repeating;
         repeating.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", recurring}});
         const auto firstDayItems = repeating.View(nowWeather)["todayBring"];
@@ -150,12 +153,15 @@ int main(int argc, char **argv) {
         const auto nextWeekItems = repeating.View(nowWeather + 7 * 1440)["todayBring"];
         Check(nextWeekItems.size() == 1 && nextWeekItems[0]["name"] == "Laptop",
               "recurring event keeps regular item but omits once-only item");
-        repeating.Execute({{"action", "memory_save"}, {"now", nowWeather}, {"id", "bring_shoes"},
+        repeating.Execute({{"action", "memory_save"},
+                           {"now", nowWeather},
+                           {"id", "bring_shoes"},
                            {"text", "Bring shoes for Programming Lab"},
-                           {"event_id", "repeat"}, {"memory_type", "bring_item"},
+                           {"event_id", "repeat"},
+                           {"memory_type", "bring_item"},
                            {"source", "event_addon"}});
         Check(repeating.Save()["memories"]["bring_shoes"]["event_id"] == "repeat" &&
-              repeating.Save()["memories"]["bring_shoes"]["memory_type"] == "bring_item",
+                  repeating.Save()["memories"]["bring_shoes"]["memory_type"] == "bring_item",
               "add-on memory retains its event and type");
         AppState app;
         app.Execute({{"action", "save_event"}, {"now", start - 60}, {"event", event}});

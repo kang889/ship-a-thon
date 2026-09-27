@@ -11,8 +11,12 @@ class MockWeatherProvider:
         return {
             "mock": True,
             "hourly": [
-                {"time": (current_hour + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%MZ"),
-                 "rain_probability": 75, "temperature": 29.0, "weather_code": 61}
+                {
+                    "time": (current_hour + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%MZ"),
+                    "rain_probability": 75,
+                    "temperature": 29.0,
+                    "weather_code": 61,
+                }
                 for i in range(48)
             ],
         }
@@ -42,8 +46,12 @@ class OpenMeteoWeatherProvider:
         return {
             "mock": False,
             "hourly": [
-                {"time": stamp + "Z", "rain_probability": probability,
-                 "temperature": temperature, "weather_code": code}
+                {
+                    "time": stamp + "Z",
+                    "rain_probability": probability,
+                    "temperature": temperature,
+                    "weather_code": code,
+                }
                 for stamp, probability, temperature, code in zip(times, probabilities, temperatures, codes)
             ],
         }

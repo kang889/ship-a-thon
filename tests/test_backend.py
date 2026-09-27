@@ -154,8 +154,9 @@ def test_weather_invalid_provider_response_and_cache():
     provider = Mock()
     provider.forecast.return_value = {
         "mock": False,
-        "hourly": [{"time": "2026-09-27T14:00Z", "rain_probability": 61,
-                    "temperature": 29.5, "weather_code": 61}],
+        "hourly": [
+            {"time": "2026-09-27T14:00Z", "rain_probability": 61, "temperature": 29.5, "weather_code": 61}
+        ],
     }
     service = WeatherService(provider=provider)
     assert service.forecast(1.35, 103.68)["available"]

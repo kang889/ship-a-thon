@@ -445,7 +445,8 @@ Json AppState::View(Minute now) const {
 
     const bool upcoming = hasEventToday && lastEventStart > now;
     const bool fresh = mWeatherAt > 0 && mWeatherAt <= now && now - mWeatherAt <= 60;
-    const bool covered = upcoming && fresh && ContextEngine::CoversWindow(mHourlyWeather, now, lastEventStart);
+    const bool covered =
+        upcoming && fresh && ContextEngine::CoversWindow(mHourlyWeather, now, lastEventStart);
     if (covered)
         relevantRainProbability = ContextEngine::MaxRainProbability(mHourlyWeather, now, lastEventStart);
 

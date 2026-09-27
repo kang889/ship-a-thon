@@ -37,7 +37,11 @@ class WeatherService:
                     raise ValueError("Forecast must use UTC ISO timestamps")
                 datetime.fromisoformat(stamp.replace("Z", "+00:00"))
                 probability = hour["rain_probability"]
-                if type(probability) not in (int, float) or not math.isfinite(probability) or not 0 <= probability <= 100:
+                if (
+                    type(probability) not in (int, float)
+                    or not math.isfinite(probability)
+                    or not 0 <= probability <= 100
+                ):
                     raise ValueError("Invalid rain probability")
                 if hour["temperature"] is not None and type(hour["temperature"]) not in (int, float):
                     raise ValueError("Invalid temperature")
