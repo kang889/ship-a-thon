@@ -13,30 +13,16 @@ using Minute = std::int64_t;
 // Platform adapters map these to the device zone.
 // Recurrence retains local class time across daylight-saving changes.
 
-enum class ItemState {
-    Needed,
-    Packed,
-    Brought,
-    InUse,
-    NeedsToReturn,
-    Safe,
-    Forgotten,
-    NotNeeded
-};
+enum class ItemState { Needed, Packed, Brought, InUse, NeedsToReturn, Safe, Forgotten, NotNeeded };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(
-    ItemState,
-    {
-        {ItemState::Needed, "NEEDED"},
-        {ItemState::Packed, "PACKED"},
-        {ItemState::Brought, "BROUGHT"},
-        {ItemState::InUse, "IN_USE"},
-        {ItemState::NeedsToReturn, "NEEDS_TO_RETURN"},
-        {ItemState::Safe, "SAFE"},
-        {ItemState::Forgotten, "FORGOTTEN"},
-        {ItemState::NotNeeded, "NOT_NEEDED"}
-    }
-)
+NLOHMANN_JSON_SERIALIZE_ENUM(ItemState, {{ItemState::Needed, "NEEDED"},
+                                         {ItemState::Packed, "PACKED"},
+                                         {ItemState::Brought, "BROUGHT"},
+                                         {ItemState::InUse, "IN_USE"},
+                                         {ItemState::NeedsToReturn, "NEEDS_TO_RETURN"},
+                                         {ItemState::Safe, "SAFE"},
+                                         {ItemState::Forgotten, "FORGOTTEN"},
+                                         {ItemState::NotNeeded, "NOT_NEEDED"}})
 
 struct Item {
     std::string id, name;
@@ -47,13 +33,7 @@ struct Item {
     Minute onlyDay = -1;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-    Item,
-    id,
-    name,
-    importance,
-    onlyDay
-)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Item, id, name, importance, onlyDay)
 
 struct Task {
     std::string id, title;
@@ -62,14 +42,7 @@ struct Task {
     bool completed = false;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-    Task,
-    id,
-    title,
-    duration,
-    deadline,
-    completed
-)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Task, id, title, duration, deadline, completed)
 
 struct Event {
     std::string id, title, course, type = "class", location, notes;
@@ -81,21 +54,8 @@ struct Event {
     std::vector<Task> tasks;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-    Event,
-    id,
-    title,
-    course,
-    type,
-    location,
-    notes,
-    start,
-    end,
-    repeatDays,
-    untilDay,
-    items,
-    tasks
-)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Event, id, title, course, type, location, notes, start, end,
+                                                repeatDays, untilDay, items, tasks)
 
 struct Occurrence {
     Event event;
@@ -113,16 +73,8 @@ struct ForgetStats {
     Minute lastSuccess = 0;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-    ForgetStats,
-    forgotten,
-    returned,
-    ignored,
-    successful,
-    lastForgotten,
-    lastSuccess
-)
-
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ForgetStats, forgotten, returned, ignored, successful,
+                                                lastForgotten, lastSuccess)
 
 // ----------------------------------------------------
 // Weather
@@ -134,12 +86,7 @@ struct WeatherHour {
     int rainProbability = -1;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-    WeatherHour,
-    time,
-    rainProbability
-)
-
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(WeatherHour, time, rainProbability)
 
 struct Weights {
     double frequency = .30;
@@ -162,28 +109,11 @@ struct Weights {
     int minimumSamples = 5;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-    Weights,
-    frequency,
-    association,
-    importance,
-    unusualness,
-    urgency,
-    medium,
-    high,
-    veryHigh,
-    bringLead,
-    returnLead,
-    rainThreshold,
-    minimumSamples
-)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Weights, frequency, association, importance, unusualness,
+                                                urgency, medium, high, veryHigh, bringLead, returnLead,
+                                                rainThreshold, minimumSamples)
 
-enum class Priority {
-    Low,
-    Medium,
-    High,
-    VeryHigh
-};
+enum class Priority { Low, Medium, High, VeryHigh };
 
 struct Reminder {
     std::string id, title, body;

@@ -73,30 +73,13 @@ int main(int argc, char **argv) {
         Check(AdaptiveTiming::Preferred(timing, 5, 15, 60) == 20, "adaptive timing");
         Check(AdaptiveTiming::Preferred(timing, 5, 30, 60) == 90, "minimum lead");
         std::vector<WeatherHour> weather{
-            {start - 120, 90},
-            {start - 60, 20},
-            {start, 30},
-            {start + 60, 80},
-            {start + 120, 40}
-        };
+            {start - 120, 90}, {start - 60, 20}, {start, 30}, {start + 60, 80}, {start + 120, 40}};
 
-        Check(
-            ContextEngine::MaxRainProbability(
-                weather,
-                start - 60,
-                start + 120
-            ) == 80,
-            "maximum rain during outing"
-        );
+        Check(ContextEngine::MaxRainProbability(weather, start - 60, start + 120) == 80,
+              "maximum rain during outing");
 
-        Check(
-            ContextEngine::MaxRainProbability(
-                weather,
-                start + 180,
-                start + 240
-            ) == -1,
-            "no weather in range"
-        );
+        Check(ContextEngine::MaxRainProbability(weather, start + 180, start + 240) == -1,
+              "no weather in range");
         Check(ContextEngine::SuggestUmbrella(75, true, weights), "rain context");
         Check(!ContextEngine::SuggestUmbrella(75, false, weights), "travel required");
         AppState app;
