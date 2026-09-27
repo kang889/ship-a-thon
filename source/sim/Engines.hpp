@@ -31,6 +31,31 @@ class ReminderDecisionEngine {
   public:
     static Priority Classify(double risk, const Weights &weights);
 };
+// Per-occurrence reminder inputs. The caller supplies the deterministic risk,
+// timing and lifecycle results; the engine owns only how they become plans.
+struct OccurrenceReminders {
+    std::string key, title;
+    // Comma-joined item names, empty when no item currently needs the reminder.
+    std::string bringItems, backItems;
+    std::string bringPrefix, backPrefix;
+    Minute bringFireAt = 0, returnFireAt = 0;
+    Priority bringPriority = Priority::Low, returnPriority = Priority::Low;
+};
+// Weather-driven "bring an umbrella" reminder input.
+struct UmbrellaReminder {
+    bool active = false;
+    Minute day = 0, fireAt = 0;
+    std::string body;
+};
+// Turns deterministic reminder inputs into the ordered notification plan.
+// Owns the gating rules, body composition, plan identity and ordering that
+// previously lived inside AppState::View. It performs no risk, timing or
+// lifecycle decisions of its own.
+class NotificationPlanEngine {
+  public:
+    static std::vector<Reminder> Build(const std::vector<OccurrenceReminders> &occurrences,
+                                       const UmbrellaReminder &umbrella, Minute now);
+};
 class PrepScheduler {
   public:
     static std::optional<Minute> FindSlot(Minute now, Minute deadline, int duration,

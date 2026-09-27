@@ -100,6 +100,32 @@ Priority ReminderDecisionEngine::Classify(double risk, const Weights &w) {
         return Priority::Medium;
     return Priority::Low;
 }
+std::vector<Reminder> NotificationPlanEngine::Build(const std::vector<OccurrenceReminders> &occurrences,
+                                                    const UmbrellaReminder &umbrella, Minute now) {
+    std::vector<Reminder> plans;
+    // Only actionable, high-enough reminders that have not already passed become
+    // plans; empty bring/return lists never produce a spurious notification.
+    const auto addPlan = [&](const std::string &id, const std::string &title, const std::string &prefix,
+                             const std::string &items, Minute fire, Priority priority) {
+        if (items.empty() || fire < now || priority < Priority::High)
+            return;
+        plans.push_back({id, title, prefix + items, fire, priority});
+    };
+    for (const auto &occurrence : occurrences) {
+        addPlan(occurrence.key + ":bring", occurrence.title, occurrence.bringPrefix, occurrence.bringItems,
+                occurrence.bringFireAt, occurrence.bringPriority);
+        addPlan(occurrence.key + ":return", occurrence.title, occurrence.backPrefix, occurrence.backItems,
+                occurrence.returnFireAt, occurrence.returnPriority);
+    }
+    if (umbrella.active) {
+        // A weather check may expire before a later event; notify promptly while it is valid.
+        plans.push_back({"weather@" + std::to_string(umbrella.day) + ":bring", "Bring for today",
+                         umbrella.body, umbrella.fireAt, Priority::High});
+    }
+    std::sort(plans.begin(), plans.end(),
+              [](const Reminder &a, const Reminder &b) { return a.fireAt < b.fireAt; });
+    return plans;
+}
 std::optional<Minute> PrepScheduler::FindSlot(Minute now, Minute deadline, int duration,
                                               const std::vector<Occurrence> &busy) {
     if (duration <= 0 || deadline <= now)

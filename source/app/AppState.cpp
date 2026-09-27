@@ -315,7 +315,8 @@ Json AppState::Execute(const Json &command) {
     return {{"ok", true}, {"state", Save()}, {"view", View(now)}};
 }
 Json AppState::View(Minute now) const {
-    Json events = Json::array(), plans = Json::array(), tasks = Json::array();
+    Json events = Json::array(), tasks = Json::array();
+    std::vector<OccurrenceReminders> reminderInputs;
     const auto occurrences = TimetableEngine::Between(mEvents, now / 1440 - 1, now / 1440 + 7);
     for (const auto &occurrence : occurrences) {
         const bool awaitingReturn =
@@ -386,21 +387,12 @@ Json AppState::View(Minute now) const {
                           {"overlap", overlap},
                           {"items", items}});
         const auto normal = mTemplates.value("NORMAL", Json::object());
-        const auto addPlan = [&](const std::string &suffix, const std::string &body, Minute fire,
-                                 Priority priority) {
-            if (body.empty() || fire < now || priority < Priority::High)
-                return;
-            plans.push_back({{"id", occurrence.key + suffix},
-                             {"title", occurrence.event.title},
-                             {"body", body},
-                             {"fireAt", fire},
-                             {"priority", PriorityName(priority)}});
-        };
-        if (!bring.empty())
-            addPlan(":bring", normal.value("bring", "Bring: ") + bring, occurrence.start - lead, maxBring);
-        if (!back.empty())
-            addPlan(":return", normal.value("return", "Before you go, check: ") + back,
-                    occurrence.end - mWeights.returnLead, maxReturn);
+        // Hand the deterministic per-occurrence results to the plan engine; it owns
+        // how these become the actual bring/return notifications.
+        reminderInputs.push_back({occurrence.key, occurrence.event.title, bring, back,
+                                  normal.value("bring", "Bring: "),
+                                  normal.value("return", "Before you go, check: "), occurrence.start - lead,
+                                  occurrence.end - mWeights.returnLead, maxBring, maxReturn});
     }
     for (const auto &event : mEvents) {
         for (const auto &task : event.tasks) {
@@ -421,8 +413,6 @@ Json AppState::View(Minute now) const {
                              {"slot", slot ? Json(*slot) : Json(nullptr)}});
         }
     }
-    std::sort(plans.begin(), plans.end(),
-              [](const auto &a, const auto &b) { return a.at("fireAt") < b.at("fireAt"); });
     const auto today = now / 1440;
 
     bool hasEventToday = false;
@@ -453,6 +443,7 @@ Json AppState::View(Minute now) const {
     const bool umbrella =
         covered && ContextEngine::SuggestUmbrella(relevantRainProbability, upcoming, mWeights);
 
+    UmbrellaReminder umbrellaPlan;
     Json todayBring = Json::array();
     if (umbrella) {
         todayBring.push_back({{"id", "weather-umbrella"},
@@ -462,14 +453,8 @@ Json AppState::View(Minute now) const {
                               {"occurrence", ""},
                               {"state", mUmbrellaPackedDay == today ? "PACKED" : "NEEDED"},
                               {"weather", true}});
-        if (mUmbrellaPackedDay != today) {
-            // A weather check may expire before a later event; notify promptly while it is valid.
-            plans.push_back({{"id", "weather@" + std::to_string(today) + ":bring"},
-                             {"title", "Bring for today"},
-                             {"body", "Bring: Umbrella · rain likely before your last event"},
-                             {"fireAt", now + 1},
-                             {"priority", PriorityName(Priority::High)}});
-        }
+        umbrellaPlan = {mUmbrellaPackedDay != today, today, now + 1,
+                        "Bring: Umbrella · rain likely before your last event"};
     }
     for (const auto &occurrence : TimetableEngine::Between(mEvents, today, today)) {
         for (const auto &item : occurrence.event.items) {
@@ -494,8 +479,14 @@ Json AppState::View(Minute now) const {
                                   {"weather", false}});
         }
     }
-    std::sort(plans.begin(), plans.end(),
-              [](const auto &a, const auto &b) { return a.at("fireAt") < b.at("fireAt"); });
+    const auto reminders = NotificationPlanEngine::Build(reminderInputs, umbrellaPlan, now);
+    Json plans = Json::array();
+    for (const auto &reminder : reminders)
+        plans.push_back({{"id", reminder.id},
+                         {"title", reminder.title},
+                         {"body", reminder.body},
+                         {"fireAt", reminder.fireAt},
+                         {"priority", PriorityName(reminder.priority)}});
 
     return {{"events", events},
             {"todayBring", todayBring},
