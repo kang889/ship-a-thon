@@ -28,5 +28,5 @@ android {
 }
 dependencies {
     implementation("com.google.firebase:firebase-auth:23.2.0")
-    implementation("com.revenuecat.purchases:purchases:8.16.0")
+    implementation("com.revenuecat.purchases:purchases:9.29.1")
 }
