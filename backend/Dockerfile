@@ -7,4 +7,5 @@ COPY backend /app/backend
 RUN useradd --create-home student && chown -R student:student /app
 USER student
 EXPOSE 8000
-CMD ["uvicorn", "backend.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+# Bind all interfaces and honour the platform-injected $PORT (Render/Railway); default 8000 locally.
+CMD ["sh", "-c", "uvicorn backend.api.main:create_app --factory --host 0.0.0.0 --port ${PORT:-8000} --no-access-log"]

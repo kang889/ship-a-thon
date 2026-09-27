@@ -19,7 +19,7 @@ DEV_TOKEN=local-development-only
 
 Obtain the key from your OpenAI API project. Do not paste it in chat or put it in Android/Gradle. The key needs API billing/credits and access to the configured model. Until you add it, keep `APP_MODE=MOCK` and `ENABLE_PAID_AI=false`; all extraction results are explicitly simulated.
 
-`MEMORY_MODE=lexical` is a local development option: it preserves labelled keyword retrieval and avoids requiring Firebase, Qdrant or an embedding-model download just to test extraction. Production still requires semantic memory and the existing authentication/subscription configuration in [SETUP.md](SETUP.md).
+`MEMORY_MODE=lexical` preserves labelled keyword retrieval and avoids requiring Qdrant or an embedding-model download. It is the default for local development and for the prototype cloud deployment (see [DEPLOYMENT.md](DEPLOYMENT.md)). `MEMORY_MODE=semantic` additionally requires Qdrant. Either way, production still requires PostgreSQL, Firebase and the subscription configuration described in [SETUP.md](SETUP.md).
 
 ## Start the backend (Windows PowerShell, repository root)
 

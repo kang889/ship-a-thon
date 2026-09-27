@@ -209,7 +209,16 @@ def test_settings_key_opt_in_and_memory_guard(monkeypatch):
     with pytest.raises(ValueError):
         Settings.from_env()
     monkeypatch.setenv("APP_MODE", "PRODUCTION")
-    with pytest.raises(ValueError, match="semantic memory"):
+    # Production still requires PostgreSQL and Firebase, so an unconfigured host is rejected.
+    with pytest.raises(ValueError, match="Production requires"):
+        Settings.from_env()
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@host:5432/db")
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "proj")
+    # The prototype deployment runs production with lexical memory and no Qdrant.
+    assert Settings.from_env().memory_mode == "lexical"
+    # Semantic memory in production still requires Qdrant credentials.
+    monkeypatch.setenv("MEMORY_MODE", "semantic")
+    with pytest.raises(ValueError, match="[Ss]emantic memory"):
         Settings.from_env()
 
 
