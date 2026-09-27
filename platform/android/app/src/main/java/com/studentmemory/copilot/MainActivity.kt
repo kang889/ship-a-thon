@@ -47,9 +47,15 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         store = CoreStore(this)
         Account.initialize(this)
+        Billing.configure(this)
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
     }
-    override fun onResume() { super.onResume(); run(JSONObject().put("action", "view")) }
+    override fun onResume() {
+        super.onResume()
+        run(JSONObject().put("action", "view"))
+        // Pro state comes from RevenueCat CustomerInfo (SDK-cached). Re-render only if it flips.
+        Billing.refreshProStatus(this) { runOnUiThread { render(currentView) } }
+    }
     private fun run(command: JSONObject): Boolean {
         try {
             val result = store.execute(command)
@@ -244,7 +250,9 @@ class MainActivity : Activity() {
         button(content, "+ Add a class or event") { edit(null) }
         button(content, "Manage timetable") { manage() }
         button(content, "Import timetable or instruction") { chooseImport() }
-        button(content, "Student Memory Pro") { Billing.show(this) }
+        button(content, if (Billing.isPro) "Student Memory Pro · active" else "Student Memory Pro") {
+            Billing.show(this) { runOnUiThread { render(currentView) } }
+        }
         button(content, "Weather context") { weather() }
         button(content, "Student memory") { memory() }
         if (Account.configured) button(content, "Sign in / create account") { signIn() }
@@ -261,6 +269,17 @@ class MainActivity : Activity() {
         return null
     }
     private fun chooseImport() {
+        // BUILD.md §23: AI timetable/lecturer screenshot extraction is a Pro feature. Gate the real
+        // AI path on the RevenueCat "pro" entitlement. The offline demo (no backend, no AI calls)
+        // stays free so offline-first behaviour is preserved.
+        if (BuildConfig.BACKEND_URL.isNotBlank() && BuildConfig.REVENUECAT_PUBLIC_KEY.isNotBlank() && !Billing.isPro) {
+            AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Pro)
+                .setTitle("AI import is a Pro feature")
+                .setMessage("AI timetable and lecturer extraction is part of Student Memory Pro.\n\nEverything else — timetable, manual events, Bring, Do, Bring Back, reminders — stays free.")
+                .setPositiveButton("See Pro") { _, _ -> Billing.show(this) { runOnUiThread { render(currentView) } } }
+                .setNegativeButton("Not now", null).show()
+            return
+        }
         // TODO(PDF p17): plus retains edit(null); unsupported event/task categories are not new routes.
         AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Import).setTitle("Import")
             .setItems(arrayOf("Timetable screenshot", "Lecturer instruction")) { _, index ->
