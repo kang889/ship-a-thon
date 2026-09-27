@@ -48,6 +48,16 @@ class AdaptiveTiming {
 };
 class ContextEngine {
   public:
-    static bool SuggestUmbrella(int rainProbability, bool travelling, const Weights &weights);
+    static int MaxRainProbability(
+        const std::vector<WeatherHour> &forecast,
+        Minute start,
+        Minute end
+    );
+
+    static bool SuggestUmbrella(
+        int rainProbability,
+        bool travelling,
+        const Weights &weights
+    );
 };
 } // namespace memory

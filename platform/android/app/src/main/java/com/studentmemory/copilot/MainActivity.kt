@@ -66,6 +66,36 @@ class MainActivity : Activity() {
         parent.addView(PackBackComponents(this).SecondaryButton(title, action))
     }
     private fun column(parent: LinearLayout): LinearLayout = PackBackComponents(this).Card().also { parent.addView(it) }
+    private fun backendToken(): String {
+      return if (BuildConfig.DEBUG && BuildConfig.BACKEND_URL.startsWith("http://10.0.2.2")) {
+        "local-development-only"
+      } else if (Account.configured) {
+        Account.token()
+      } else {
+        identityToken
+      }
+    }
+    private fun syncEvents() {
+     if (BuildConfig.BACKEND_URL.isBlank()) return
+
+     val events = state.optJSONArray("events") ?: JSONArray()
+     val body = JSONObject()
+        .put("events", JSONArray(events.toString()))
+
+     Thread {
+        try {
+            BackendClient(backendToken()).request("/sync", body)
+        } catch (error: Exception) {
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    "Saved locally; cloud sync pending",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+     }.start()
+    }
     private fun time(minute: Long) = LocalDateTime.ofEpochSecond(minute * 60, 0, ZoneOffset.UTC)
         .format(DateTimeFormatter.ofPattern("EEE d MMM · HH:mm"))
     private fun render(view: JSONObject) {
@@ -263,7 +293,7 @@ class MainActivity : Activity() {
                     .put("event_id", eventId)
                 if (BuildConfig.BACKEND_URL.isBlank()) command.put("input", input.toString())
                 else {
-                    val result = BackendClient(if (Account.configured) Account.token() else identityToken).request("/ai/$kind/extract", input)
+                    val result = BackendClient(backendToken()).request("/ai/$kind/extract", input)
                     command.put("data", result.getJSONObject("data")).put("mock", result.getBoolean("mock"))
                 }
                 val result = store.execute(command)
@@ -315,7 +345,7 @@ class MainActivity : Activity() {
     private fun backend(path: String, body: JSONObject? = null, done: (JSONObject) -> Unit) {
         Thread {
             try {
-                val token = if (Account.configured) Account.token() else identityToken
+                val token = backendToken()
                 val result = BackendClient(token).request(path, body)
                 runOnUiThread { done(result) }
             } catch (error: Exception) {
@@ -326,24 +356,145 @@ class MainActivity : Activity() {
     }
     private fun weather() {
         if (BuildConfig.BACKEND_URL.isBlank()) {
-            run(JSONObject().put("action", "weather").put("mock", true))
-            Toast.makeText(this, "Demo forecast: 75% rain. Umbrella appears for travel today.", Toast.LENGTH_LONG).show()
+            val updated = run(
+                JSONObject()
+                    .put("action", "weather")
+                    .put("mock", true)
+            )
+
+            if (updated) {
+                Toast.makeText(
+                    this,
+                    "Demo forecast loaded.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+
             return
         }
-        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 16, 28, 16) }
-        val latitude = EditText(this).apply { hint = "Latitude"; form.addView(this) }
-        val longitude = EditText(this).apply { hint = "Longitude"; form.addView(this) }
-        AlertDialog.Builder(this).setTitle("Weather location (no background tracking)").setView(form)
+
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 16, 28, 16)
+        }
+
+        val latitude = EditText(this).apply {
+            hint = "Latitude"
+            form.addView(this)
+        }
+
+        val longitude = EditText(this).apply {
+            hint = "Longitude"
+            form.addView(this)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Weather location (no background tracking)")
+            .setView(form)
             .setPositiveButton("Get forecast") { _, _ ->
-                val lat = latitude.text.toString().toDoubleOrNull()
-                val lon = longitude.text.toString().toDoubleOrNull()
-                if (lat == null || lon == null) { Toast.makeText(this, "Enter valid coordinates", Toast.LENGTH_LONG).show(); return@setPositiveButton }
-                backend("/weather?latitude=$lat&longitude=$lon") { result ->
-                    if (result.optBoolean("available")) run(JSONObject().put("action", "weather")
-                        .put("rain_probability", result.getInt("rain_probability")).put("mock", result.getBoolean("mock")))
-                    else Toast.makeText(this, "Forecast unavailable. Your checklist still works.", Toast.LENGTH_LONG).show()
+                val lat =
+                    latitude.text.toString().toDoubleOrNull()
+
+                val lon =
+                    longitude.text.toString().toDoubleOrNull()
+
+                if (lat == null || lon == null) {
+                    Toast.makeText(
+                        this,
+                        "Enter valid coordinates",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    return@setPositiveButton
                 }
-            }.setNegativeButton("Cancel", null).show()
+
+                backend(
+                    "/weather?latitude=$lat&longitude=$lon"
+                ) { result ->
+
+                    if (!result.optBoolean("available")) {
+                        Toast.makeText(
+                            this,
+                            "Forecast unavailable. Your checklist still works.",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        return@backend
+                    }
+
+                    val hourly =
+                        result.optJSONArray("hourly")
+                            ?: JSONArray()
+
+                    val hourlyForCore =
+                        JSONArray()
+
+                    for (i in 0 until hourly.length()) {
+                        val point =
+                            hourly.getJSONObject(i)
+
+                        val minute =
+                            LocalDateTime
+                                .parse(
+                                    point.getString("time")
+                                )
+                                .toEpochSecond(
+                                    ZoneOffset.UTC
+                                ) / 60
+
+                        hourlyForCore.put(
+                            JSONObject()
+                                .put(
+                                    "time",
+                                    minute
+                                )
+                                .put(
+                                    "rain_probability",
+                                    point.getInt(
+                                        "rain_probability"
+                                    )
+                                )
+                        )
+                    }
+
+                    val updated = run(
+                        JSONObject()
+                            .put(
+                                "action",
+                                "weather"
+                            )
+                            .put(
+                                "rain_probability",
+                                result.getInt(
+                                    "rain_probability"
+                                )
+                            )
+                            .put(
+                                "hourly",
+                                hourlyForCore
+                            )
+                            .put(
+                                "mock",
+                                result.getBoolean(
+                                    "mock"
+                                )
+                            )
+                    )
+
+                    if (updated) {
+                        Toast.makeText(
+                            this,
+                            "Forecast updated · ${hourly.length()} hourly points loaded",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+            .setNegativeButton(
+                "Cancel",
+                null
+            )
+            .show()
     }
     private fun memory() {
         val input = EditText(this).apply { hint = "Write a note, or ask what you need tomorrow"; minLines = 3 }
@@ -371,7 +522,7 @@ class MainActivity : Activity() {
         }
         Thread {
             try {
-                BackendClient(if (Account.configured) Account.token() else identityToken).delete("/memory/$id")
+                BackendClient(backendToken()).delete("/memory/$id")
                 runOnUiThread { Toast.makeText(this, "Memory deleted", Toast.LENGTH_SHORT).show() }
             } catch (error: Exception) { runOnUiThread { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() } }
         }.start()
@@ -384,6 +535,23 @@ class MainActivity : Activity() {
             state = result.getJSONObject("state")
             done(result)
         } catch (error: Exception) { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() }
+    }
+    private fun deleteEventFromBackend(id: String) {
+     if (BuildConfig.BACKEND_URL.isBlank()) return
+
+     Thread {
+        try {
+            BackendClient(backendToken()).delete("/events/$id")
+        } catch (error: Exception) {
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    "Deleted locally; cloud deletion pending",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+     }.start()
     }
     private fun signIn() {
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 16, 28, 16) }
@@ -447,7 +615,9 @@ class MainActivity : Activity() {
         if (original != null && onSave == null) dialog.setNeutralButton("Delete") { _, _ ->
             AlertDialog.Builder(this).setTitle("Delete this event and all its occurrences?")
                 .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ ->
-                    run(JSONObject().put("action", "delete_event").put("id", original.getString("id")))
+                   val id = original.getString("id")
+                   if (run(JSONObject().put("action", "delete_event").put("id", id))) {
+                    deleteEventFromBackend(id)}
                 }.show()
         }
         val shown = dialog.create()
@@ -475,6 +645,7 @@ class MainActivity : Activity() {
                     val result = store.execute(JSONObject().put("action", "save_event").put("event", event))
                     state = result.getJSONObject("state")
                     Reminders.schedule(this, result.getJSONObject("view").getJSONArray("notifications"))
+                    syncEvents()
                     render(result.getJSONObject("view")); shown.dismiss()
                 } catch (error: Exception) { Toast.makeText(this, error.message ?: "Check the entered values", Toast.LENGTH_LONG).show() }
             }
