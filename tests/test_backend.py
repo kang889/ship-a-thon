@@ -87,6 +87,7 @@ def test_weather_timeout(monkeypatch):
     monkeypatch.setattr(httpx, "get", timeout)
     assert WeatherService().forecast(1.3, 103.8)["available"] is False
 
+
 def test_weather_hourly_forecast(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
@@ -94,9 +95,7 @@ def test_weather_hourly_forecast(monkeypatch):
 
         def json(self):
             return {
-                "daily": {
-                    "precipitation_probability_max": [80]
-                },
+                "daily": {"precipitation_probability_max": [80]},
                 "hourly": {
                     "time": [
                         "2026-09-27T14:00",

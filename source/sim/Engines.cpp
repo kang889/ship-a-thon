@@ -147,19 +147,12 @@ int AdaptiveTiming::Preferred(const std::array<TimingBucket, 5> &history, int mi
     return best;
 }
 
-int ContextEngine::MaxRainProbability(
-    const std::vector<WeatherHour> &forecast,
-    Minute start,
-    Minute end
-) {
+int ContextEngine::MaxRainProbability(const std::vector<WeatherHour> &forecast, Minute start, Minute end) {
     int maximum = -1;
 
     for (const auto &hour : forecast) {
         if (hour.time >= start && hour.time < end) {
-            maximum = std::max(
-                maximum,
-                hour.rainProbability
-            );
+            maximum = std::max(maximum, hour.rainProbability);
         }
     }
 

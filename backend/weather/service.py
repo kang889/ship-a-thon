@@ -32,20 +32,13 @@ class WeatherService:
                 params={
                     "latitude": key[0],
                     "longitude": key[1],
-
                     # Keep today's maximum rain probability
                     # for backward compatibility.
                     "daily": "precipitation_probability_max",
-
                     # Hourly forecast used later for determining
                     # whether rain may occur while the student
                     # is outside.
-                    "hourly": (
-                        "precipitation_probability,"
-                        "temperature_2m,"
-                        "weather_code"
-                    ),
-
+                    "hourly": ("precipitation_probability,temperature_2m,weather_code"),
                     # Today + tomorrow.
                     "forecast_days": 2,
                     "timezone": "auto",
@@ -58,10 +51,7 @@ class WeatherService:
 
             probability = data["daily"]["precipitation_probability_max"][0]
 
-            if (
-                not isinstance(probability, (int, float))
-                or not 0 <= probability <= 100
-            ):
+            if not isinstance(probability, (int, float)) or not 0 <= probability <= 100:
                 raise ValueError("Invalid weather")
 
             hourly_data = data["hourly"]
@@ -71,12 +61,7 @@ class WeatherService:
             temperatures = hourly_data["temperature_2m"]
             weather_codes = hourly_data["weather_code"]
 
-            if not (
-                len(times)
-                == len(probabilities)
-                == len(temperatures)
-                == len(weather_codes)
-            ):
+            if not (len(times) == len(probabilities) == len(temperatures) == len(weather_codes)):
                 raise ValueError("Invalid hourly weather")
 
             hourly = []
@@ -87,10 +72,7 @@ class WeatherService:
                 temperatures,
                 weather_codes,
             ):
-                if (
-                    not isinstance(rain_probability, (int, float))
-                    or not 0 <= rain_probability <= 100
-                ):
+                if not isinstance(rain_probability, (int, float)) or not 0 <= rain_probability <= 100:
                     raise ValueError("Invalid hourly rain probability")
 
                 if not isinstance(temperature, (int, float)):
