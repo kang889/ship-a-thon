@@ -95,7 +95,6 @@ def test_weather_hourly_forecast(monkeypatch):
 
         def json(self):
             return {
-                "daily": {"precipitation_probability_max": [80]},
                 "hourly": {
                     "time": [
                         "2026-09-27T14:00",
@@ -132,13 +131,40 @@ def test_weather_hourly_forecast(monkeypatch):
     assert len(result["hourly"]) == 2
 
     assert result["hourly"][0] == {
-        "time": "2026-09-27T14:00",
+        "time": "2026-09-27T14:00Z",
         "rain_probability": 70,
         "temperature": 29.5,
         "weather_code": 61,
     }
 
     assert result["hourly"][1]["rain_probability"] == 80
+
+
+def test_mock_weather_is_hourly_and_available(client):
+    result = client.get("/api/v1/weather?latitude=1.35&longitude=103.68")
+    assert result.status_code == 200
+    data = result.json()
+    assert data["available"] and data["mock"]
+    assert len(data["hourly"]) == 48
+    assert data["hourly"][0]["time"].endswith("Z")
+    assert client.get("/api/v1/weather?latitude=100&longitude=103").status_code == 422
+
+
+def test_weather_invalid_provider_response_and_cache():
+    provider = Mock()
+    provider.forecast.return_value = {
+        "mock": False,
+        "hourly": [{"time": "2026-09-27T14:00Z", "rain_probability": 61,
+                    "temperature": 29.5, "weather_code": 61}],
+    }
+    service = WeatherService(provider=provider)
+    assert service.forecast(1.35, 103.68)["available"]
+    assert service.forecast(1.35, 103.68)["available"]
+    assert provider.forecast.call_count == 1
+    provider.forecast.return_value["hourly"][0]["rain_probability"] = 101
+    assert WeatherService(provider=provider).forecast(1.35, 103.68)["available"] is False
+    provider.forecast.return_value["hourly"][0]["rain_probability"] = 60.5
+    assert WeatherService(provider=provider).forecast(1.35, 103.68)["hourly"][0]["rain_probability"] == 61
 
 
 def test_event_crud_and_memory(client):

@@ -225,44 +225,28 @@ Json AppState::Execute(const Json &command) {
         return {{"ok", true}, {"state", Save()}, {"view", View(now)}, {"preview", preview}, {"mock", mock}};
     }
     if (action == "weather") {
-        mHourlyWeather.clear();
-
-        if (command.value("mock", false)) {
-            FakeBackend backend;
-
-            mRainProbability = backend.Weather().data.at("rain_probability");
-
-            mWeatherMock = true;
-        } else {
-            const auto probability = command.at("rain_probability").get<int>();
-
-            if (probability < 0 || probability > 100) {
-                throw std::invalid_argument("Invalid rain probability.");
-            }
-
-            mRainProbability = probability;
-
-            if (command.contains("hourly")) {
-                for (const auto &point : command.at("hourly")) {
-                    const auto time = point.at("time").get<Minute>();
-
-                    const auto rainProbability = point.at("rain_probability").get<int>();
-
-                    if (time < 0 || rainProbability < 0 || rainProbability > 100) {
-                        throw std::invalid_argument("Invalid hourly weather.");
-                    }
-
-                    mHourlyWeather.push_back({time, rainProbability});
-                }
-
-                std::sort(mHourlyWeather.begin(), mHourlyWeather.end(),
-                          [](const WeatherHour &a, const WeatherHour &b) { return a.time < b.time; });
-            }
-
-            mWeatherMock = false;
+        std::vector<WeatherHour> hours;
+        const auto &points = command.at("hourly");
+        if (!points.is_array() || points.size() > 240)
+            throw std::invalid_argument("Invalid hourly forecast size.");
+        for (const auto &point : points) {
+            const auto time = point.at("time").get<Minute>();
+            const auto rainProbability = point.at("rain_probability").get<int>();
+            if (time < 0 || rainProbability < 0 || rainProbability > 100)
+                throw std::invalid_argument("Invalid hourly weather.");
+            hours.push_back({time, rainProbability});
         }
-
+        std::sort(hours.begin(), hours.end(),
+                  [](const WeatherHour &a, const WeatherHour &b) { return a.time < b.time; });
+        mHourlyWeather = std::move(hours);
+        mRainProbability = -1;
+        mWeatherMock = command.value("mock", false);
         mWeatherAt = now;
+    } else if (action == "weather_clear") {
+        mHourlyWeather.clear();
+        mRainProbability = -1;
+        mWeatherAt = 0;
+        mWeatherMock = false;
     } else if (action == "confirm_import") {
         if (!command.value("confirmed", false))
             throw std::invalid_argument("Review and confirm the import before saving.");
@@ -433,41 +417,31 @@ Json AppState::View(Minute now) const {
     const auto today = now / 1440;
 
     bool hasEventToday = false;
-    Minute firstEventStart = 0;
+    Minute lastEventStart = 0;
+    std::string lastEventTitle;
 
     for (const auto &occurrence : occurrences) {
         if (occurrence.start / 1440 != today)
             continue;
 
-        if (!hasEventToday || occurrence.start < firstEventStart)
-            firstEventStart = occurrence.start;
+        if (!hasEventToday || occurrence.start > lastEventStart) {
+            lastEventStart = occurrence.start;
+            lastEventTitle = occurrence.event.title;
+        }
 
         hasEventToday = true;
     }
 
     int relevantRainProbability = -1;
 
-    if (hasEventToday) {
-        if (!mHourlyWeather.empty()) {
-            const auto estimatedLeaveTime = firstEventStart - mWeights.bringLead;
-
-            const auto weatherStart = std::max(now, estimatedLeaveTime);
-
-            const auto endOfToday = (today + 1) * 1440;
-
-            relevantRainProbability =
-                ContextEngine::MaxRainProbability(mHourlyWeather, weatherStart, endOfToday);
-        }
-
-        // Fallback for demo weather or old saved states.
-        if (relevantRainProbability < 0)
-            relevantRainProbability = mRainProbability;
-    }
-
-    const bool fresh = mWeatherAt > 0 && mWeatherAt <= now && mWeatherAt / 1440 == today;
+    const bool upcoming = hasEventToday && lastEventStart > now;
+    const bool fresh = mWeatherAt > 0 && mWeatherAt <= now && now - mWeatherAt <= 60;
+    const bool covered = upcoming && fresh && ContextEngine::CoversWindow(mHourlyWeather, now, lastEventStart);
+    if (covered)
+        relevantRainProbability = ContextEngine::MaxRainProbability(mHourlyWeather, now, lastEventStart);
 
     const bool umbrella =
-        fresh && ContextEngine::SuggestUmbrella(relevantRainProbability, hasEventToday, mWeights);
+        covered && ContextEngine::SuggestUmbrella(relevantRainProbability, upcoming, mWeights);
 
     return {{"events", events},
             {"tasks", tasks},
@@ -475,6 +449,11 @@ Json AppState::View(Minute now) const {
 
             {"weatherChecked", fresh},
             {"weatherHasEventToday", hasEventToday},
+            {"weatherLastEventTitle", lastEventTitle},
+            {"weatherLastEventStart", hasEventToday ? lastEventStart : Minute{0}},
+            {"weatherWindowStart", now},
+            {"weatherWindowEnd", upcoming ? lastEventStart : Minute{0}},
+            {"weatherCovered", covered},
             {"weatherRainProbability", relevantRainProbability},
 
             {"umbrella", umbrella},

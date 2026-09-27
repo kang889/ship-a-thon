@@ -20,6 +20,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.UUID
@@ -28,6 +30,7 @@ class MainActivity : Activity() {
     private lateinit var content: LinearLayout
     private lateinit var store: CoreStore
     private var state = JSONObject()
+    private var currentView = JSONObject()
     private val ink get() = PackBackTheme(this).ink
     private val green get() = PackBackTheme(this).brand
     private var importKind = "timetable"
@@ -47,6 +50,7 @@ class MainActivity : Activity() {
             val result = store.execute(command)
             state = result.getJSONObject("state")
             val view = result.getJSONObject("view")
+            currentView = view
             Reminders.schedule(this, view.getJSONArray("notifications"))
             render(view)
             return true
@@ -125,7 +129,7 @@ class MainActivity : Activity() {
         }
         if (view.optBoolean("umbrella")) {
             ui.Space(content,12)
-            content.addView(ui.Pill("Rain likely" + if(view.optBoolean("weatherMock")) " · demo weather" else "",Tone.AI))
+            content.addView(ui.Pill("☂ Rain likely · Bring an umbrella" + if(view.optBoolean("weatherMock")) " · demo weather" else "",Tone.AI))
         }
         if (events.length() > 1) button(content, if (showWeek) "Focus on next event" else "Show upcoming week") {
             showWeek = !showWeek; render(view)
@@ -355,24 +359,70 @@ class MainActivity : Activity() {
         }.start()
     }
     private fun weather() {
-        if (BuildConfig.BACKEND_URL.isBlank()) {
-            val updated = run(
-                JSONObject()
-                    .put("action", "weather")
-                    .put("mock", true)
-            )
+        AlertDialog.Builder(this).setTitle("Weather context")
+            .setItems(arrayOf("Test demo forecast", "Get real forecast", "Clear weather")) { _, choice ->
+                when (choice) {
+                    0 -> demoWeather()
+                    1 -> if (BuildConfig.BACKEND_URL.isBlank()) {
+                        Toast.makeText(this, "Configure a backend URL to fetch real weather", Toast.LENGTH_LONG).show()
+                    } else fetchRealWeather()
+                    2 -> run(JSONObject().put("action", "weather_clear"))
+                }
+            }.show()
+    }
 
-            if (updated) {
-                Toast.makeText(
-                    this,
-                    "Demo forecast loaded.",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
+    private fun weatherSummary(): String {
+        val view = currentView
+        val last = view.optLong("weatherLastEventStart")
+        val event = if (view.optBoolean("weatherHasEventToday"))
+            "${view.optString("weatherLastEventTitle")} · ${time(last)}" else "None"
+        val window = if (view.optLong("weatherWindowEnd") > view.optLong("weatherWindowStart"))
+            "${time(view.getLong("weatherWindowStart"))} → ${time(view.getLong("weatherWindowEnd"))}"
+            else "No upcoming last event"
+        val probability = view.optInt("weatherRainProbability", -1)
+        val highest = if (probability >= 0) "$probability%" else "Unavailable"
+        return "Last event today: $event\nCheck window: $window\nForecast covers window: ${if (view.optBoolean("weatherCovered")) "Yes" else "No"}\nHighest rain probability: $highest\nBring umbrella: ${if (view.optBoolean("umbrella")) "YES" else "NO"}"
+    }
 
-            return
+    private fun demoWeather() {
+        // Fill the entire remaining day with dry hourly values, then override one hour.
+        // The resulting forecast uses exactly the same C++ rule as a server forecast.
+        val now = LocalDateTime.now()
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 16, 28, 16) }
+        form.addView(TextView(this).apply { text = weatherSummary() })
+        val hour = EditText(this).apply {
+            hint = "Forecast hour · HH:00 (today)"
+            setText(now.withMinute(0).format(DateTimeFormatter.ofPattern("HH:mm")))
+            form.addView(this)
         }
+        val chance = EditText(this).apply { hint = "Rain probability · 0–100"; setText("75"); inputType = 2; form.addView(this) }
+        AlertDialog.Builder(this).setTitle("Demo weather context").setView(form)
+            .setPositiveButton("Apply weather") { _, _ ->
+                try {
+                    val selected = LocalDateTime.of(now.toLocalDate(), java.time.LocalTime.parse(hour.text.toString().trim()))
+                    require(selected.minute == 0) { "Use an exact hour, such as 16:00." }
+                    val probability = chance.text.toString().trim().toInt()
+                    require(probability in 0..100) { "Probability must be 0–100%." }
+                    val points = JSONArray()
+                    var cursor = now.withMinute(0).withSecond(0).withNano(0)
+                    while (cursor.toLocalDate() == now.toLocalDate()) {
+                        val minute = cursor.toEpochSecond(ZoneOffset.UTC) / 60
+                        points.put(JSONObject().put("time", minute)
+                            .put("rain_probability", if (cursor == selected) probability else 0))
+                        cursor = cursor.plusHours(1)
+                    }
+                    if (run(JSONObject().put("action", "weather").put("mock", true).put("hourly", points))) {
+                        AlertDialog.Builder(this).setTitle("Weather decision")
+                            .setMessage(weatherSummary()).setPositiveButton("OK", null).show()
+                    }
+                } catch (error: Exception) {
+                    AlertDialog.Builder(this).setTitle("Invalid demo forecast")
+                        .setMessage(error.message).setPositiveButton("OK", null).show()
+                }
+            }.setNegativeButton("Cancel", null).show()
+    }
 
+    private fun fetchRealWeather() {
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(28, 16, 28, 16)
@@ -408,11 +458,14 @@ class MainActivity : Activity() {
                     return@setPositiveButton
                 }
 
+                // A failed refresh must not leave an earlier forecast active.
+                run(JSONObject().put("action", "weather_clear"))
                 backend(
                     "/weather?latitude=$lat&longitude=$lon"
                 ) { result ->
 
                     if (!result.optBoolean("available")) {
+                        run(JSONObject().put("action", "weather_clear"))
                         Toast.makeText(
                             this,
                             "Forecast unavailable. Your checklist still works.",
@@ -434,13 +487,10 @@ class MainActivity : Activity() {
                             hourly.getJSONObject(i)
 
                         val minute =
-                            LocalDateTime
-                                .parse(
-                                    point.getString("time")
-                                )
-                                .toEpochSecond(
-                                    ZoneOffset.UTC
-                                ) / 60
+                            LocalDateTime.ofInstant(
+                                Instant.parse(point.getString("time")),
+                                ZoneId.systemDefault()
+                            ).toEpochSecond(ZoneOffset.UTC) / 60
 
                         hourlyForCore.put(
                             JSONObject()
@@ -462,12 +512,6 @@ class MainActivity : Activity() {
                             .put(
                                 "action",
                                 "weather"
-                            )
-                            .put(
-                                "rain_probability",
-                                result.getInt(
-                                    "rain_probability"
-                                )
                             )
                             .put(
                                 "hourly",

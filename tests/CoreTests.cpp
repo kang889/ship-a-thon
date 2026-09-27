@@ -81,7 +81,45 @@ int main(int argc, char **argv) {
         Check(ContextEngine::MaxRainProbability(weather, start + 180, start + 240) == -1,
               "no weather in range");
         Check(ContextEngine::SuggestUmbrella(75, true, weights), "rain context");
+        Check(!ContextEngine::SuggestUmbrella(60, true, weights), "60 percent does not trigger");
+        Check(ContextEngine::SuggestUmbrella(61, true, weights), "61 percent triggers");
         Check(!ContextEngine::SuggestUmbrella(75, false, weights), "travel required");
+        const Minute nowWeather = start - 60;
+        auto later = event;
+        later.id = "last";
+        later.title = "Evening class";
+        later.start = start + 240;
+        later.end = later.start + 60;
+        AppState forecastApp;
+        forecastApp.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", event}});
+        forecastApp.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", later}});
+        auto forecast = [&](int chance, Minute rainAt) {
+            nlohmann::json hours = nlohmann::json::array();
+            for (Minute hour = nowWeather; hour <= later.start; hour += 60)
+                hours.push_back({{"time", hour}, {"rain_probability", hour == rainAt ? chance : 0}});
+            return forecastApp.Execute({{"action", "weather"}, {"now", nowWeather},
+                                        {"mock", true}, {"hourly", hours}}).at("view");
+        };
+        Check(forecast(60, start + 120)["umbrella"] == false, "exactly 60 is safe");
+        auto decision = forecast(61, start + 120);
+        Check(decision["umbrella"] == true && decision["weatherLastEventStart"] == later.start,
+              "rain before last event triggers");
+        Check(decision["weatherRainProbability"] == 61 && decision["weatherCovered"] == true,
+              "weather context reports rule inputs");
+        Check(forecast(90, later.start)["umbrella"] == false, "rain after last event ignored");
+        Check(forecast(61, nowWeather)["umbrella"] == true, "current forecast hour included");
+        Check(forecastApp.View(nowWeather + 15)["umbrella"] == true, "current partial hour included");
+        Check(forecastApp.View(later.start)["umbrella"] == false, "last event has begun");
+        Check(forecastApp.View(nowWeather + 61)["weatherChecked"] == false, "stale forecast expires");
+        Check(AppState().View(nowWeather)["umbrella"] == false, "no event today");
+        AppState partialForecast;
+        partialForecast.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", later}});
+        auto incomplete = partialForecast.Execute({{"action", "weather"}, {"now", nowWeather},
+            {"hourly", nlohmann::json::array({{{"time", nowWeather + 60}, {"rain_probability", 95}}})}});
+        Check(incomplete["view"]["umbrella"] == false && incomplete["view"]["weatherCovered"] == false,
+              "partial forecast must not guess");
+        partialForecast.Execute({{"action", "weather_clear"}, {"now", nowWeather}});
+        Check(partialForecast.View(nowWeather)["weatherChecked"] == false, "unavailable clears forecast");
         AppState app;
         app.Execute({{"action", "save_event"}, {"now", start - 60}, {"event", event}});
         const auto key = "lab@" + std::to_string(day);

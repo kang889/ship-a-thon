@@ -103,6 +103,14 @@ In RevenueCat, connect your Google Play application, define a `pro` entitlement 
 - Defaults: five physical attempts per user per UTC day and fifty globally. Each retry consumes a reservation. Parsing/validation is retried at most once; HTTP errors aren't automatically retried. Provider-side budget limits should also be configured when you add a key.
 - These are request limits, not a guaranteed currency budget. Actual charges depend on the configured provider's current prices and input size.
 - Cached weather lasts one hour. Weather decisions, recurrence, risk, preparation and reminder wording are deterministic.
+
+### Weather forecast and demo verification
+
+`GET /api/v1/weather?latitude=1.35&longitude=103.68` requires the same bearer token as other endpoints. It returns `available`, `mock`, `rain_probability` (informational maximum), and `hourly` points with UTC ISO 8601 `time` values ending in `Z`, `rain_probability` (0–100), `temperature`, and `weather_code`. MOCK mode uses an hourly synthetic provider; LOCAL and PRODUCTION use Open-Meteo. `backend/weather/providers.py` is the provider boundary for another forecast API. The Android client converts UTC forecast hours to device civil time before passing them to the C++ core. Keep the app's event timezone aligned with the phone timezone when entering coordinates for another location.
+
+The core checks hourly rain from the current partial hour until **before the start of today's last event**. It recommends an umbrella only if the whole remaining interval has contiguous hourly coverage and a probability exceeds 60%. An expired or unavailable forecast, no upcoming last event, exactly 60%, and rain only after that event do not trigger it. Cached backend results and on-device weather decisions expire after one hour. Older saved daily maxima are ignored for decisions.
+
+On Android tap **Weather context → Test demo forecast**. Enter a local hour today (`HH:00`) and a probability (`0–100`), then tap **Apply weather**. The app fills the other remaining hourly points with 0% and shows the chosen last event, window, coverage, maximum and decision. Try 60% and 61% before the last event, then 75% at or after it. **Get real forecast** prompts for coordinates and calls the same weather endpoint when `backendUrl` is configured. **Clear weather** removes the current forecast. The demo and real forecasts pass through the same native rule.
 - The default development/test flow makes **zero paid AI calls**. Model downloads and optional server hosting still use bandwidth/storage/compute.
 
 ## Verified and remaining

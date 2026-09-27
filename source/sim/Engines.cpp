@@ -151,7 +151,8 @@ int ContextEngine::MaxRainProbability(const std::vector<WeatherHour> &forecast, 
     int maximum = -1;
 
     for (const auto &hour : forecast) {
-        if (hour.time >= start && hour.time < end) {
+        if (hour.time < end && hour.time + 60 > start && hour.rainProbability >= 0 &&
+            hour.rainProbability <= 100) {
             maximum = std::max(maximum, hour.rainProbability);
         }
     }
@@ -159,7 +160,22 @@ int ContextEngine::MaxRainProbability(const std::vector<WeatherHour> &forecast, 
     return maximum;
 }
 
+bool ContextEngine::CoversWindow(const std::vector<WeatherHour> &forecast, Minute start, Minute end) {
+    if (end <= start)
+        return false;
+    Minute coveredUntil = start;
+    for (const auto &hour : forecast) {
+        if (hour.rainProbability < 0 || hour.rainProbability > 100 || hour.time > coveredUntil)
+            continue;
+        if (hour.time + 60 > coveredUntil)
+            coveredUntil = hour.time + 60;
+        if (coveredUntil >= end)
+            return true;
+    }
+    return false;
+}
+
 bool ContextEngine::SuggestUmbrella(int rainProbability, bool travelling, const Weights &weights) {
-    return travelling && rainProbability >= weights.rainThreshold && rainProbability <= 100;
+    return travelling && rainProbability > weights.rainThreshold && rainProbability <= 100;
 }
 } // namespace memory
