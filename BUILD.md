@@ -423,6 +423,40 @@ Bring:
 [PACKED] [REMIND LATER] [NOT NEEDED TODAY]
 ```
 
+Reminder rule (required-item coverage):
+
+- **Every** item still in `ItemState::Needed` for an upcoming event appears in the
+  Bring checklist **and** in that event's Bring notification, regardless of its
+  calculated priority (LOW / MEDIUM / HIGH / VERY HIGH).
+- A brand-new item is therefore reminded even if the user has never forgotten it.
+- Priority describes **risk / intensity and explainability**, not whether the
+  reminder exists. It must never gate a required-item notification.
+- The notification bundles all still-needed items and retains the **maximum**
+  priority among them as metadata (for future intensity logic and UI emphasis).
+- No notification is produced for an empty item list, for items that are
+  `NOT_NEEDED` / `SAFE`, for `PACKED` items in the initial Bring reminder, or for
+  invalid lifecycle states. Duplicate delivery is prevented by the delivery layer.
+- `AdaptiveTiming` decides the **intended** time the reminder fires (see §9); it
+  never decides whether the reminder or any item belongs in it.
+
+Bring reminder timing (late / missed fallback):
+
+```text
+intendedBringTime = event.start − AdaptiveTiming/fallback lead
+
+if now < intendedBringTime:      fire at intendedBringTime
+else if now < event.start:       fire promptly at now + 1   (late fallback)
+else (event already started):    no initial Bring notification
+```
+
+The `now + 1` late fallback covers events/items added late, the app reopened
+after the intended time, or a schedule refresh just past the minute boundary. It
+is a **delivery-reliability** fallback only: it never becomes the "preferred"
+time and never mutates `AdaptiveTiming` history. This adjustment is computed in
+C++ (`AppState`, which owns `event.start`, `now`, the adaptive lead and lifecycle
+state); `NotificationPlanEngine` only assembles valid plans and drops any that are
+still in the past, and Kotlin only delivers them.
+
 ### 5.5 Pre-event navigation reminder
 
 Shortly before an event:
@@ -455,6 +489,10 @@ Everything with you?
 Only include items relevant to the current item lifecycle.
 
 Do not show every item the user owns.
+
+Any item in a state where `ItemLifecycleEngine::ShouldReturn(...)` is true is
+included in the Bring Back notification regardless of its priority
+(LOW / MEDIUM / HIGH / VERY HIGH). Priority is not a suppression gate here either.
 
 ### 5.7 Recurring preferences
 
@@ -523,13 +561,50 @@ This is deterministic C++ scheduling, not an LLM call.
 
 ### 5.10 Weather context
 
-Example rule:
+Umbrella is only considered when the user has at least one relevant event that
+day. With no events that day, no weather-based umbrella is suggested even if rain
+is likely.
+
+A **relevant event** is an event today that has not finished yet (`end > now`).
+The **first relevant event** of the remaining day defines the preparation time.
+For a day with a relevant event, the evaluation window is:
 
 ```text
-rain_probability >= configured_threshold
-AND user is expected to travel
-→ suggest umbrella
+calculatedPreparationTime = first relevant event's start
+                            − that event's reminder lead
+                              (AdaptiveTiming preferred lead, else fallback bringLead)
+
+weatherWindowStart = max(now, calculatedPreparationTime)   # never in the past
+weatherWindowEnd   = last relevant event's END + 60 minutes
+
+weather window = weatherWindowStart .. weatherWindowEnd
 ```
+
+`weatherWindowStart` is clamped with `max(now, …)`: the window never begins in the
+past, so a completed earlier event cannot push it backwards, and the period before
+preparation begins is not evaluated.
+
+Example: now 08:00, first event 10:00, preparation lead 45 min, last event
+16:00–18:00 → preparation 09:15, window **09:15 .. 19:00**. If now were 09:30
+(after the 09:15 preparation), the window would begin at **09:30**.
+
+Rule:
+
+```text
+forecast fully covers the window
+AND max rain_probability in the window > configured rainThreshold
+→ Umbrella becomes a required "Bring Today" item and a reminder is scheduled
+```
+
+- The umbrella reminder fires at `calculatedPreparationTime` when that time is
+  still in the future. If preparation has already passed when valid weather
+  becomes actionable, it fires promptly at `now + 1` rather than in the past.
+- If the umbrella is already marked packed for the day, it stays visible as
+  packed and **no** duplicate umbrella reminder is scheduled.
+- If forecast coverage of the window is incomplete, stay conservative: do not
+  invent a rain decision.
+- The `rainThreshold` is configurable (`data/reminder_weights.json`); do not
+  hard-code a probability.
 
 Do not use AI for simple weather decisions.
 
@@ -639,28 +714,40 @@ Do not scatter magic numbers across code.
 
 ## 8. Reminder Decision Engine
 
-`ReminderDecisionEngine` decides:
-
-- what should be shown
-- whether the user should be interrupted
-- when the reminder should fire
-- how strong the reminder should be
-
-Suggested levels:
+`ReminderDecisionEngine` classifies each item's forget risk into a priority
+level:
 
 ```text
-LOW
-→ checklist only
-
-MEDIUM
-→ highlight in app
-
-HIGH
-→ local push notification
-
-VERY HIGH
-→ persistent / high-priority reminder where supported
+LOW / MEDIUM / HIGH / VERY HIGH
 ```
+
+This priority is **risk / intensity metadata**. It:
+
+- appears in the UI and identifies HIGH RISK items,
+- provides explainability ("why am I seeing this?"),
+- is available to future notification-intensity logic,
+- is retained on a notification plan as the maximum priority of its items.
+
+Priority does **not** determine whether a required-item reminder exists. Every
+still-`Needed` Bring item and every `ShouldReturn` Bring Back item is reminded
+regardless of priority (see §5.4 and §5.6). The obsolete model where
+`LOW → checklist only`, `MEDIUM → highlight only` and `HIGH → notification`
+gated notification existence no longer applies to required Bring / Bring Back
+items.
+
+Responsibility split:
+
+- `ItemLifecycleEngine` — **what** is still needed / must be returned.
+- `ForgetRiskEngine` / `ReminderDecisionEngine` — **how important** (risk priority) each item is.
+- `AdaptiveTiming` — the **intended when** a reminder should fire (§9).
+- Late fallback (`now + 1`) — **delivery reliability** only, when the intended
+  time was missed but the event has not started (§5.4); it does not change the
+  intended time or `AdaptiveTiming` history.
+- `ContextEngine` — contextual requirement such as the umbrella (§5.10).
+- `NotificationPlanEngine` — **plan assembly**: bundles all actionable items,
+  keeps max priority as metadata, drops empty/past plans.
+- Kotlin — **Android delivery** only: schedules and displays these C++-produced
+  plans (no business rules).
 
 Design principle:
 
@@ -705,7 +792,23 @@ Example:
 20 min: packed
 ```
 
-Over sufficient history, prefer the timing window with a stronger successful-action rate while still giving the student enough time to act.
+Representative preferred leads for the buckets above are 150 / 90 / 45 / 20 / 10
+minutes.
+
+Over sufficient history (`minimumSamples`), prefer the timing window with a
+stronger successful-action rate while still giving the student enough time to
+act.
+
+`AdaptiveTiming` decides **only when** a reminder should fire:
+
+- New user / insufficient samples → the configurable fallback Bring lead
+  (`bringLead` in `data/reminder_weights.json`, currently **60 minutes**).
+- Enough historical response data → the learned preferred lead for that event.
+
+It must **not** decide whether a reminder exists, whether an item belongs in a
+reminder, item priority, or whether an umbrella is needed. It only shifts the
+fire time. This is deterministic and testable — no reinforcement learning, no
+AI/ML.
 
 Make the algorithm deterministic and testable.
 
@@ -1514,7 +1617,9 @@ The build is not considered complete until this works end-to-end:
 12. User marks charger as forgotten.
 13. Forget Profile updates.
 14. Next similar class gives charger a higher risk.
-15. Reminder strength increases accordingly.
+15. Reminder priority/strength increases accordingly (the charger was already
+    reminded regardless of risk; higher risk raises its intensity metadata, not
+    whether it is reminded).
 16. User pastes or uploads a lecturer instruction.
 17. AI extracts Bring and Do information.
 18. User confirms it.
