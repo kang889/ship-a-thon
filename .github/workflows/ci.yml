@@ -46,6 +46,9 @@ jobs:
   android-smoke:
     # Lightweight smoke test: reuse the APK built by the `android` job, install it on a
     # single emulator, launch PackBack and confirm it does not crash on startup.
+    # Runs only on pull requests and on the main branch; skipped for pushes to other
+    # branches (e.g. kang) to keep those pushes fast.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: android
     runs-on: ubuntu-latest
     steps:
@@ -77,32 +80,4 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            set -e
-            adb wait-for-device
-            echo "Installing the CI-built APK..."
-            adb install -r apk/app-debug.apk
-            adb logcat -c
-            echo "Launching PackBack..."
-            adb shell am start -W -n com.studentmemory.copilot/com.studentmemory.copilot.MainActivity
-            # Give the app a moment to initialise (or crash) after launch.
-            sleep 10
-            PID="$(adb shell pidof com.studentmemory.copilot | tr -d '\r')"
-            if [ -z "$PID" ]; then
-              echo "::error::PackBack is not running after launch — it failed to start or crashed immediately."
-              adb logcat -d -t 400 | grep -iE "AndroidRuntime|FATAL|ActivityManager.*com.studentmemory.copilot" || true
-              exit 1
-            fi
-            # A crash may still be recorded even if a restart happened; fail only on a fatal
-            # signature attributable to PackBack. Scope the fatal-exception check to the app's own
-            # PID so an unrelated emulator process logging FATAL EXCEPTION cannot fail the job.
-            if adb logcat -d --pid="$PID" | grep -E "FATAL EXCEPTION"; then
-              echo "::error::PackBack (pid $PID) logged a fatal exception immediately after launch."
-              exit 1
-            fi
-            # ANR/force-finish lines are emitted by system_server, so match them by package name.
-            if adb logcat -d | grep -E "Force finishing activity com.studentmemory.copilot|ANR in com.studentmemory.copilot"; then
-              echo "::error::PackBack was force-finished or triggered an ANR immediately after launch."
-              exit 1
-            fi
-            echo "PackBack launched and is still running (pid $PID). Smoke test passed."
+          script: bash .github/scripts/android-smoke.sh
