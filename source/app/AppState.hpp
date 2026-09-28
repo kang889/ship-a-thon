@@ -41,6 +41,7 @@ class AppState {
     Minute mUmbrellaPackedDay = -1;
 
     std::map<std::string, std::array<TimingBucket, 5>> mTiming;
+    bool mAdaptiveTimingEnabled = false;
 
     nlohmann::json mMemories = nlohmann::json::object();
 

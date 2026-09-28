@@ -4,6 +4,11 @@ import android.Manifest
 import android.app.Activity
 import com.studentmemory.copilot.ui.PackBackDialog as AlertDialog
 import android.content.Intent
+import android.content.Context
+import android.net.Uri
+import android.provider.Settings
+import android.location.Geocoder
+import java.util.Locale
 import android.graphics.Color
 import com.studentmemory.copilot.ui.PackBackTheme
 import com.studentmemory.copilot.ui.PackBackComponents
@@ -43,6 +48,9 @@ class MainActivity : Activity() {
     // Session-only identity token. No private service keys are accepted by this client.
     private var identityToken = ""
     private var showWeek = false
+    private var showProfile = false
+    private var pendingProFeature: ProFeature? = null
+    private val profilePrefs by lazy { getSharedPreferences("student_profile", Context.MODE_PRIVATE) }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = CoreStore(this)
@@ -53,8 +61,23 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         run(JSONObject().put("action", "view"))
+        val lat = profilePrefs.getString("latitude", "")?.toDoubleOrNull()
+        val lon = profilePrefs.getString("longitude", "")?.toDoubleOrNull()
+        if (BuildConfig.BACKEND_URL.isNotBlank() && currentView.optBoolean("weatherHasEventToday") &&
+            !currentView.optBoolean("weatherChecked") && lat != null && lon != null &&
+            System.currentTimeMillis() - profilePrefs.getLong("last_weather_attempt", 0L) > 30 * 60 * 1000L) {
+            loadRealWeather(lat, lon)
+        }
         // Pro state comes from RevenueCat CustomerInfo (SDK-cached). Re-render only if it flips.
-        Billing.refreshProStatus(this) { runOnUiThread { render(currentView) } }
+        if (Account.userId() == null) {
+            Billing.clearSession()
+            if (state.optBoolean("adaptiveTimingEnabled", false))
+                run(JSONObject().put("action", "adaptive_timing").put("enabled", false))
+        } else Billing.checkPro(this) { active -> runOnUiThread {
+            if (active == false && state.optBoolean("adaptiveTimingEnabled", false))
+                run(JSONObject().put("action", "adaptive_timing").put("enabled", false))
+            else render(currentView)
+        } }
     }
     private fun run(command: JSONObject): Boolean {
         try {
@@ -118,7 +141,7 @@ class MainActivity : Activity() {
         error.message?.trim()?.takeIf { it.isNotEmpty() } ?: fallback
     private fun render(view: JSONObject) {
         val events = view.getJSONArray("events")
-        val returning = !showWeek && events.length() > 0 && events.getJSONObject(0).getString("phase") == "BRING BACK"
+        val returning = !showProfile && !showWeek && events.length() > 0 && events.getJSONObject(0).getString("phase") == "BRING BACK"
         val palette = PackBackTheme(this, returning)
         val ui = PackBackComponents(this, palette)
         val root = ui.Column().apply { setBackgroundColor(palette.background) }
@@ -128,12 +151,16 @@ class MainActivity : Activity() {
         }
         content = ui.Column().apply { setPadding(palette.dp(20),palette.dp(20),palette.dp(20),palette.dp(24)) }
         root.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(content) }, LinearLayout.LayoutParams(-1,0,1f))
-        root.addView(ui.BottomNav(null, { manage() }, { edit(null) }, { memory() }))
+        root.addView(ui.BottomNav({ showProfile = false; render(currentView) },
+            { showProfile = false; manage() }, { edit(null) },
+            { openProFeature(ProFeature.SEMANTIC_STUDENT_MEMORY) },
+            { showProfile = true; render(currentView) }, if (showProfile) 4 else 0))
         setContentView(root)
         window.statusBarColor = palette.background
         window.navigationBarColor = palette.card
         window.decorView.systemUiVisibility = if (palette.dark || returning) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
 
+        if (showProfile) { renderProfile(content); return }
         // TODO(PDF p8/19): no display-name binding or timed weather forecast exists. Omit sample identity and forecast time.
         val almost = events.length() > 0 && events.getJSONObject(0).getString("phase") == "NEXT"
         if (!returning) {
@@ -249,16 +276,14 @@ class MainActivity : Activity() {
         }
         if(events.length()==0) ui.Space(content,100)
         content.addView(ui.SectionHeader("Your tools"))
-        // Existing routes/callbacks stay available. No Profile/onboarding route is added by this reskin.
+        // These contextual shortcuts lead to the same Profile subscription routing.
         button(content, "+ Add a class or event") { edit(null) }
         button(content, "Manage timetable") { manage() }
         button(content, "Import timetable or instruction") { chooseImport() }
-        button(content, if (Billing.isPro) "Student Memory Pro · active" else "Student Memory Pro") {
-            Billing.show(this) { runOnUiThread { render(currentView) } }
-        }
+        button(content, "Student Memory Pro") { showProfile = true; render(currentView) }
         button(content, "Weather context") { weather() }
-        button(content, "Student memory") { memory() }
-        if (Account.configured) button(content, "Sign in / create account") { signIn() }
+        button(content, "Student memory") { openProFeature(ProFeature.SEMANTIC_STUDENT_MEMORY) }
+        if (Account.configured && Account.userId() == null) button(content, "Sign in / create account") { signIn() }
         if (BuildConfig.BACKEND_URL.isNotBlank()) button(content, "Connect backend session") {
             val input = EditText(this).apply { hint = "Firebase identity token (or local development token)" }
             AlertDialog.Builder(this).setTitle("Connect session").setView(input)
@@ -266,35 +291,291 @@ class MainActivity : Activity() {
                 .setNegativeButton("Cancel", null).show()
         }
     }
+    private fun openProFeature(feature: ProFeature) {
+        pendingProFeature = feature
+        if (Account.userId() == null) {
+            signIn { pendingProFeature?.let(::openProFeature) }
+            return
+        }
+        Billing.checkPro(this) { entitled -> runOnUiThread {
+            if (pendingProFeature != feature || Account.userId() == null) return@runOnUiThread
+            when (entitled) {
+                true -> {
+                    pendingProFeature = null
+                    openUnlockedFeature(feature)
+                    render(currentView)
+                }
+                false -> Billing.show(this, onUnlocked = {
+                    val requested = pendingProFeature
+                    if (requested != null && Account.userId() != null) {
+                        pendingProFeature = null
+                        openUnlockedFeature(requested)
+                    }
+                }, onChanged = { render(currentView) })
+                null -> AlertDialog.Builder(this).setTitle("Could not verify Pro")
+                    .setMessage("Check your connection and RevenueCat configuration, then retry.")
+                    .setPositiveButton("Retry") { _, _ -> openProFeature(feature) }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        } }
+    }
+
+    private fun openUnlockedFeature(feature: ProFeature) {
+        when (feature) {
+            ProFeature.AI_TIMETABLE_EXTRACTION, ProFeature.AI_INSTRUCTION_EXTRACTION -> beginImport(feature)
+            ProFeature.SEMANTIC_STUDENT_MEMORY -> memory()
+            ProFeature.ADAPTIVE_REMINDER_TIMING -> adaptiveReminderSettings()
+            ProFeature.ADVANCED_FORGET_PROFILE -> forgetInsights()
+            ProFeature.RICHER_CONTEXT_INTEGRATIONS -> AlertDialog.Builder(this)
+                .setTitle("Advanced context")
+                .setMessage("Richer context integrations are being built. Basic weather and rain-to-umbrella reminders are available to everyone now.")
+                .setPositiveButton("Weather context") { _, _ -> weather() }
+                .setNegativeButton("Close", null).show()
+        }
+    }
+
+    private fun adaptiveReminderSettings() {
+        val enabled = state.optBoolean("adaptiveTimingEnabled", false)
+        AlertDialog.Builder(this).setTitle("Adaptive reminders")
+            .setMessage("When enabled, reminders use timing learned from your responses to previous class reminders. Until enough responses are recorded, the usual fixed reminder time applies.\n\nCurrently: ${if (enabled) "On" else "Off"}")
+            .setPositiveButton(if (enabled) "Turn off" else "Turn on") { _, _ ->
+                // Core keeps collecting basic response/forget history for Free users.
+                run(JSONObject().put("action", "adaptive_timing").put("enabled", !enabled))
+            }.setNegativeButton("Close", null).show()
+    }
+
+    private fun forgetInsights() {
+        val profile = state.optJSONObject("profile") ?: JSONObject()
+        val events = state.optJSONArray("events") ?: JSONArray()
+        val results = mutableListOf<Pair<String, Int>>()
+        var total = 0
+        for (key in profile.keys()) {
+            val count = profile.optJSONObject(key)?.optInt("forgotten", 0) ?: 0
+            total += count
+            if (count == 0) continue
+            val ids = try { JSONArray(key) } catch (_: Exception) { null }
+            var label = "Item"
+            if (ids != null && ids.length() == 2) {
+                for (i in 0 until events.length()) {
+                    val event = events.getJSONObject(i)
+                    if (event.optString("id") != ids.optString(0)) continue
+                    val items = event.optJSONArray("items") ?: JSONArray()
+                    for (j in 0 until items.length()) if (items.getJSONObject(j).optString("id") == ids.optString(1))
+                        label = "${items.getJSONObject(j).optString("name")} · ${event.optString("title")}" 
+                }
+            }
+            results.add(label to count)
+        }
+        val details = results.sortedByDescending { it.second }.take(8)
+            .joinToString("\n") { "${it.first}: ${it.second} time(s)" }
+        AlertDialog.Builder(this).setTitle("Forget Profile insights")
+            .setMessage(if (total == 0) "No forgotten items recorded yet. Basic forget tracking stays active for everyone."
+                else "Forgotten $total time(s) in total.\n\nMost often forgotten:\n$details")
+            .setPositiveButton("Close", null).show()
+    }
+
+    private fun renderProfile(parent: LinearLayout) {
+        val theme = PackBackTheme(this)
+        val ui = PackBackComponents(this, theme)
+        parent.addView(ui.Label("Profile", 32f, true, weight = 700))
+        val userId = Account.userId()
+        parent.addView(ui.SectionHeader("Account / User information"))
+        val account = ui.Card()
+        account.addView(ui.Label(Account.email() ?: "Sign in / Create account", 17f, weight = 700))
+        account.addView(ui.Label(if (userId == null) "Sign in to access Student Memory Pro." else "Your student account", 13f, color = theme.secondary))
+        if (userId == null) button(account, "Sign in / Create account") { signIn() }
+        parent.addView(account)
+
+        parent.addView(ui.SectionHeader("Student profile"))
+        profileRow(parent, "pin", "Country / Region and University",
+            listOf(profilePrefs.getString("country", ""), profilePrefs.getString("university", ""))
+                .filter { !it.isNullOrBlank() }.joinToString(" · ").ifBlank { "Set your study location" }) { editStudentProfile() }
+        profileRow(parent, "sun", "Weather location",
+            if (profilePrefs.contains("latitude"))
+                "${profilePrefs.getString("latitude", "")}, ${profilePrefs.getString("longitude", "")}" else "Set a location for your forecast") {
+            fetchRealWeather()
+        }
+
+        parent.addView(ui.SectionHeader("Preferences"))
+        profileRow(parent, "bag", "Default bring items", "Preselect common items for new events") { editDefaultBring() }
+        profileRow(parent, "clock", "Basic reminder settings", "Manage notification permission") {
+            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+        }
+        profileRow(parent, "umbrella", "Weather context", "Forecast and umbrella reminders · Free") { weather() }
+
+        parent.addView(ui.SectionHeader("Student Memory Pro"))
+        val summary = ui.Card().apply { background = theme.shape(theme.brandSoft) }
+        summary.addView(ui.Label("Student Memory Pro", 23f, true, weight = 700))
+        summary.addView(ui.Label("Free remembers your day. Pro learns how you forget.", 14f, color = theme.secondary))
+        val status = when { userId == null -> "Sign in to unlock Pro"; Billing.isPro -> "Pro active"; else -> "Upgrade to Pro" }
+        summary.addView(ui.Label(status, 15f, weight = 800, color = theme.brandText))
+        button(summary, status) {
+            if (userId == null) signIn { showProfilePaywall() }
+            else showProfilePaywall()
+        }
+        parent.addView(summary)
+        parent.addView(ui.SectionHeader("Pro features"))
+        for (feature in ProFeature.values()) profileFeatureRow(parent, feature)
+
+        parent.addView(ui.SectionHeader("Account / subscription"))
+        profileRow(parent, "calendar", "Manage subscription", "View your subscription in Google Play") {
+            if (Account.userId() == null) signIn { manageSubscription() } else manageSubscription()
+        }
+        profileRow(parent, "back", "Restore purchases", "Refresh your Pro entitlement") {
+            if (Account.userId() == null) signIn { restoreSubscription() } else restoreSubscription()
+        }
+        if (userId != null) profileRow(parent, "profile", "Sign out", "Sign out of this account") {
+            Account.signOut(); Billing.clearSession(); pendingProFeature = null
+            if (state.optBoolean("adaptiveTimingEnabled", false))
+                run(JSONObject().put("action", "adaptive_timing").put("enabled", false))
+            else render(currentView)
+        }
+    }
+
+    private fun profileRow(parent: LinearLayout, icon: String, title: String, subtitle: String, action: () -> Unit) {
+        val ui = PackBackComponents(this)
+        val theme = PackBackTheme(this)
+        val card = ui.Card(16)
+        val row = ui.Row().apply { gravity = android.view.Gravity.CENTER_VERTICAL }
+        row.addView(ui.IconTile(icon, Tone.Brand))
+        val labels = ui.Column().apply { setPadding(theme.dp(12), 0, theme.dp(8), 0) }
+        labels.addView(ui.Label(title, 15f, weight = 800))
+        labels.addView(ui.Label(subtitle, 12f, color = theme.secondary))
+        row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(ui.Icon("chevron", theme.muted, 18))
+        card.addView(row)
+        card.setOnClickListener { action() }
+        parent.addView(card)
+    }
+
+    private fun profileFeatureRow(parent: LinearLayout, feature: ProFeature) {
+        val ui = PackBackComponents(this)
+        val theme = PackBackTheme(this)
+        val card = ui.Card(16)
+        val row = ui.Row().apply { gravity = android.view.Gravity.CENTER_VERTICAL }
+        row.addView(ui.IconTile(feature.icon, Tone.AI))
+        val labels = ui.Column().apply { setPadding(theme.dp(12), 0, theme.dp(6), 0) }
+        labels.addView(ui.Label(feature.title, 15f, weight = 800))
+        labels.addView(ui.Label(feature.description, 12f, color = theme.secondary))
+        row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(ui.Pill(if (Billing.isPro && Account.userId() != null) "ACTIVE" else "PRO", Tone.AI))
+        row.addView(ui.Icon("chevron", theme.muted, 16))
+        card.addView(row)
+        card.setOnClickListener { openProFeature(feature) }
+        parent.addView(card)
+    }
+
+    private fun showProfilePaywall() {
+        Billing.checkPro(this) { active -> runOnUiThread {
+            when (active) {
+                true -> { render(currentView); Toast.makeText(this, "Pro active", Toast.LENGTH_SHORT).show() }
+                false -> Billing.show(this, onUnlocked = { render(currentView) }, onChanged = { render(currentView) })
+                null -> AlertDialog.Builder(this).setTitle("Subscription unavailable")
+                    .setMessage("Unable to check your subscription. Please try again.")
+                    .setPositiveButton("Retry") { _, _ -> showProfilePaywall() }.setNegativeButton("Close", null).show()
+            }
+        } }
+    }
+
+    private fun restoreSubscription() {
+        Billing.restore(this, onUnlocked = {
+            render(currentView)
+            Toast.makeText(this, "Pro restored", Toast.LENGTH_SHORT).show()
+        }, onChanged = { render(currentView) })
+    }
+
+    private fun manageSubscription() {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/account/subscriptions")))
+    }
+
+    private fun editStudentProfile() {
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 12, 28, 12) }
+        val country = EditText(this).apply {
+            hint = "Country / Region"; setText(profilePrefs.getString("country", "")); form.addView(this)
+        }
+        val university = EditText(this).apply {
+            hint = "University"; setText(profilePrefs.getString("university", "")); form.addView(this)
+        }
+        AlertDialog.Builder(this).setTitle("Student profile").setView(form)
+            .setPositiveButton("Save") { _, _ ->
+                val region = country.text.toString().trim()
+                val school = university.text.toString().trim()
+                profilePrefs.edit().putString("country", region).putString("university", school)
+                    .remove("latitude").remove("longitude").apply()
+                render(currentView)
+                if (school.isNotBlank() && region.isNotBlank()) {
+                    Thread {
+                        try {
+                            @Suppress("DEPRECATION")
+                            val places = Geocoder(this, Locale.ENGLISH).getFromLocationName("$school, $region", 1)
+                            val place = places?.firstOrNull()
+                            runOnUiThread {
+                                if (place != null && profilePrefs.getString("country", "") == region &&
+                                    profilePrefs.getString("university", "") == school) {
+                                    profilePrefs.edit().putString("latitude", place.latitude.toString())
+                                        .putString("longitude", place.longitude.toString()).apply()
+                                    render(currentView)
+                                    loadRealWeather(place.latitude, place.longitude)
+                                } else if (place == null) Toast.makeText(this,
+                                    "Location not found. Enter coordinates under Weather location.", Toast.LENGTH_LONG).show()
+                            }
+                        } catch (_: Exception) { runOnUiThread { Toast.makeText(this,
+                            "Location lookup unavailable. Enter coordinates under Weather location.", Toast.LENGTH_LONG).show() } }
+                    }.start()
+                }
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun editDefaultBring() {
+        val selected = (profilePrefs.getStringSet("default_bring", emptySet()) ?: emptySet()).toMutableSet()
+        val theme = PackBackTheme(this)
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 12, 28, 12) }
+        for (pair in bringSuggestions.chunked(2)) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (item in pair) row.addView(CheckBox(this).apply {
+                text = item; buttonDrawable = null; gravity = android.view.Gravity.CENTER
+                isChecked = item in selected
+                fun restyle() { background = theme.ripple(if (isChecked) theme.brandSoft else theme.card, 14,
+                    if (isChecked) theme.brand else theme.line) }
+                restyle()
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked) selected.add(item) else selected.remove(item)
+                    restyle()
+                }
+            }, LinearLayout.LayoutParams(0, theme.dp(58), 1f).apply {
+                rightMargin = theme.dp(8); bottomMargin = theme.dp(8)
+            })
+            if (pair.size == 1) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+            form.addView(row)
+        }
+        AlertDialog.Builder(this).setTitle("Default bring items")
+            .setView(ScrollView(this).apply { addView(form) })
+            .setPositiveButton("Save") { _, _ -> profilePrefs.edit().putStringSet("default_bring", selected).apply() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun findEvent(id: String): JSONObject? {
         val events = state.optJSONArray("events") ?: return null
         for (i in 0 until events.length()) if (events.getJSONObject(i).getString("id") == id) return events.getJSONObject(i)
         return null
     }
     private fun chooseImport() {
-        // BUILD.md §23: AI timetable/lecturer screenshot extraction is a Pro feature. Gate the real
-        // AI path on the RevenueCat "pro" entitlement. The offline demo (no backend, no AI calls)
-        // stays free so offline-first behaviour is preserved.
-        if (BuildConfig.BACKEND_URL.isNotBlank() && BuildConfig.REVENUECAT_PUBLIC_KEY.isNotBlank() && !Billing.isPro) {
-            AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Pro)
-                .setTitle("AI import is a Pro feature")
-                .setMessage("AI timetable and lecturer extraction is part of Student Memory Pro.\n\nEverything else — timetable, manual events, Bring, Do, Bring Back, reminders — stays free.")
-                .setPositiveButton("See Pro") { _, _ -> Billing.show(this) { runOnUiThread { render(currentView) } } }
-                .setNegativeButton("Not now", null).show()
-            return
-        }
-        // TODO(PDF p17): plus retains edit(null); unsupported event/task categories are not new routes.
         AlertDialog.Builder(this).presentation(PackBackDialog.Layout.Import).setTitle("Import")
             .setItems(arrayOf("Timetable screenshot", "Lecturer instruction")) { _, index ->
-                importKind = if (index == 0) "timetable" else "instruction"
-                if (index == 0) chooseInput() else {
-                    val events = state.optJSONArray("events") ?: JSONArray()
-                    if (events.length() == 0) { Toast.makeText(this, "Add a class first", Toast.LENGTH_LONG).show(); return@setItems }
-                    AlertDialog.Builder(this).setTitle("Which class?")
-                        .setItems(Array(events.length()) { events.getJSONObject(it).getString("title") }) { _, choice ->
-                            importEventId = events.getJSONObject(choice).getString("id"); chooseInput()
-                        }.show()
-                }
+                openProFeature(if (index == 0) ProFeature.AI_TIMETABLE_EXTRACTION
+                    else ProFeature.AI_INSTRUCTION_EXTRACTION)
+            }.show()
+    }
+    private fun beginImport(feature: ProFeature) {
+        importKind = if (feature == ProFeature.AI_TIMETABLE_EXTRACTION) "timetable" else "instruction"
+        if (importKind == "timetable") { chooseInput(); return }
+        val events = state.optJSONArray("events") ?: JSONArray()
+        if (events.length() == 0) {
+            Toast.makeText(this, "Add a class first", Toast.LENGTH_LONG).show(); return
+        }
+        AlertDialog.Builder(this).setTitle("Which class?")
+            .setItems(Array(events.length()) { events.getJSONObject(it).getString("title") }) { _, index ->
+                importEventId = events.getJSONObject(index).getString("id"); chooseInput()
             }.show()
     }
     private fun chooseInput() {
@@ -486,11 +767,13 @@ class MainActivity : Activity() {
 
         val latitude = EditText(this).apply {
             hint = "Latitude"
+            setText(profilePrefs.getString("latitude", ""))
             form.addView(this)
         }
 
         val longitude = EditText(this).apply {
             hint = "Longitude"
+            setText(profilePrefs.getString("longitude", ""))
             form.addView(this)
         }
 
@@ -504,7 +787,7 @@ class MainActivity : Activity() {
                 val lon =
                     longitude.text.toString().toDoubleOrNull()
 
-                if (lat == null || lon == null) {
+                if (lat == null || lon == null || lat !in -90.0..90.0 || lon !in -180.0..180.0) {
                     Toast.makeText(
                         this,
                         "Enter valid coordinates",
@@ -514,87 +797,96 @@ class MainActivity : Activity() {
                     return@setPositiveButton
                 }
 
-                // A failed refresh must not leave an earlier forecast active.
-                run(JSONObject().put("action", "weather_clear"))
-                backend(
-                    "/weather?latitude=$lat&longitude=$lon"
-                ) { result ->
-
-                    if (!result.optBoolean("available")) {
-                        run(JSONObject().put("action", "weather_clear"))
-                        Toast.makeText(
-                            this,
-                            "Forecast unavailable. Your checklist still works.",
-                            Toast.LENGTH_LONG
-                        ).show()
-
-                        return@backend
-                    }
-
-                    val hourly =
-                        result.optJSONArray("hourly")
-                            ?: JSONArray()
-
-                    val hourlyForCore =
-                        JSONArray()
-
-                    for (i in 0 until hourly.length()) {
-                        val point =
-                            hourly.getJSONObject(i)
-
-                        val minute =
-                            LocalDateTime.ofInstant(
-                                Instant.parse(point.getString("time")),
-                                ZoneId.systemDefault()
-                            ).toEpochSecond(ZoneOffset.UTC) / 60
-
-                        hourlyForCore.put(
-                            JSONObject()
-                                .put(
-                                    "time",
-                                    minute
-                                )
-                                .put(
-                                    "rain_probability",
-                                    point.getInt(
-                                        "rain_probability"
-                                    )
-                                )
-                        )
-                    }
-
-                    val updated = run(
-                        JSONObject()
-                            .put(
-                                "action",
-                                "weather"
-                            )
-                            .put(
-                                "hourly",
-                                hourlyForCore
-                            )
-                            .put(
-                                "mock",
-                                result.getBoolean(
-                                    "mock"
-                                )
-                            )
-                    )
-
-                    if (updated) {
-                        Toast.makeText(
-                            this,
-                            "Forecast updated · ${hourly.length()} hourly points loaded",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
+                loadRealWeather(lat, lon)
             }
             .setNegativeButton(
                 "Cancel",
                 null
             )
             .show()
+    }
+    private fun loadRealWeather(lat: Double, lon: Double) {
+        profilePrefs.edit().putString("latitude", lat.toString()).putString("longitude", lon.toString()).apply()
+        if (BuildConfig.BACKEND_URL.isBlank()) {
+            Toast.makeText(this, "Configure a backend URL to fetch real weather", Toast.LENGTH_LONG).show()
+            return
+        }
+        profilePrefs.edit().putLong("last_weather_attempt", System.currentTimeMillis()).apply()
+        // A failed refresh must not leave an earlier forecast active.
+        run(JSONObject().put("action", "weather_clear"))
+        backend(
+            "/weather?latitude=$lat&longitude=$lon"
+        ) { result ->
+
+            if (!result.optBoolean("available")) {
+                run(JSONObject().put("action", "weather_clear"))
+                Toast.makeText(
+                    this,
+                    "Forecast unavailable. Your checklist still works.",
+                    Toast.LENGTH_LONG
+                ).show()
+
+                return@backend
+            }
+
+            val hourly =
+                result.optJSONArray("hourly")
+                    ?: JSONArray()
+
+            val hourlyForCore =
+                JSONArray()
+
+            for (i in 0 until hourly.length()) {
+                val point =
+                    hourly.getJSONObject(i)
+
+                val minute =
+                    LocalDateTime.ofInstant(
+                        Instant.parse(point.getString("time")),
+                        ZoneId.systemDefault()
+                    ).toEpochSecond(ZoneOffset.UTC) / 60
+
+                hourlyForCore.put(
+                    JSONObject()
+                        .put(
+                            "time",
+                            minute
+                        )
+                        .put(
+                            "rain_probability",
+                            point.getInt(
+                                "rain_probability"
+                            )
+                        )
+                )
+            }
+
+            val updated = run(
+                JSONObject()
+                    .put(
+                        "action",
+                        "weather"
+                    )
+                    .put(
+                        "hourly",
+                        hourlyForCore
+                    )
+                    .put(
+                        "mock",
+                        result.getBoolean(
+                            "mock"
+                        )
+                    )
+            )
+
+            if (updated) {
+                Toast.makeText(
+                    this,
+                    "Forecast updated · ${hourly.length()} hourly points loaded",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
     }
     private fun memory() {
         val input = EditText(this).apply { hint = "Write a note, or ask what you need tomorrow"; minLines = 3 }
@@ -682,7 +974,7 @@ class MainActivity : Activity() {
         }
      }.start()
     }
-    private fun signIn() {
+    private fun signIn(afterSuccess: (() -> Unit)? = null) {
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 16, 28, 16) }
         val email = EditText(this).apply { hint = "Email"; inputType = 33; form.addView(this) }
         val password = EditText(this).apply { hint = "Password"; inputType = 129; form.addView(this) }
@@ -692,7 +984,12 @@ class MainActivity : Activity() {
             Thread {
                 try {
                     Account.signIn(emailText, passwordText, create)
-                    runOnUiThread { Toast.makeText(this, "Signed in", Toast.LENGTH_SHORT).show() }
+                    runOnUiThread {
+                        Toast.makeText(this, "Signed in", Toast.LENGTH_SHORT).show()
+                        Billing.clearSession()
+                        render(currentView)
+                        afterSuccess?.invoke()
+                    }
                 } catch (error: Exception) {
                     runOnUiThread { Toast.makeText(this, friendly(error, "Sign-in failed. Check your details and connection."), Toast.LENGTH_LONG).show() }
                 }
@@ -763,7 +1060,9 @@ class MainActivity : Activity() {
             }
         }
         val commonChecks = bringSuggestions.associateWith { suggestion ->
-            chip(suggestion, activeItems.any { it.getString("name").equals(suggestion, ignoreCase = true) })
+            chip(suggestion, if (original == null)
+                suggestion in (profilePrefs.getStringSet("default_bring", emptySet()) ?: emptySet())
+                else activeItems.any { it.getString("name").equals(suggestion, ignoreCase = true) })
         }
         val commonGrid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; form.addView(this) }
         addChipRows(commonGrid, commonChecks.values.toList())

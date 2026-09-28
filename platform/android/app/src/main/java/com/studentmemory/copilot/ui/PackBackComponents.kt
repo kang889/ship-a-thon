@@ -101,12 +101,12 @@ class PackBackComponents(val context: Context, val theme: PackBackTheme = PackBa
         trackTintList=android.content.res.ColorStateList.valueOf(if(checked) theme.brand else theme.line)
         if(onChanged != null) setOnCheckedChangeListener { _, value -> onChanged(value) } else isEnabled=false
     }
-    fun BottomNav(today: (() -> Unit)?, schedule: (() -> Unit)?, add: (() -> Unit)?, memory: (() -> Unit)?, profile: (() -> Unit)? = null): LinearLayout = Row().apply {
+    fun BottomNav(today: (() -> Unit)?, schedule: (() -> Unit)?, add: (() -> Unit)?, memory: (() -> Unit)?, profile: (() -> Unit)? = null, selectedTab: Int = 0): LinearLayout = Row().apply {
         setPadding(theme.dp(8),theme.dp(10),theme.dp(8),theme.dp(8)); background=theme.shape(theme.card,0); theme.elevate(this,8)
         val entries=listOf(Triple("Today","sun",today),Triple("Schedule","calendar",schedule),Triple("","plus",add),Triple("Memory","memory",memory),Triple("Profile","profile",profile))
         for((index,entry) in entries.withIndex()) {
             val cell=Column().apply { gravity=Gravity.CENTER; minimumHeight=theme.dp(56) }
-            val selected=index==0
+            val selected=index==selectedTab
             if(index==2) {
                 val tile=FrameLayout(context).apply { background=theme.ripple(theme.brand,18); theme.elevate(this,5) }
                 tile.addView(Icon("plus",Color.WHITE,28),FrameLayout.LayoutParams(theme.dp(28),theme.dp(28),Gravity.CENTER))
@@ -119,7 +119,6 @@ class PackBackComponents(val context: Context, val theme: PackBackTheme = PackBa
             if(entry.third != null) cell.setOnClickListener { entry.third?.invoke() } else { cell.isEnabled=false; if(!selected)cell.alpha=.45f }
             addView(cell,LinearLayout.LayoutParams(0,-2,1f))
         }
-        // TODO(PDF p26): no Profile route exists; do not invent navigation or settings handlers.
     }
     fun AppLogo(size: Int = 40): FrameLayout = FrameLayout(context).apply {
         background=theme.shape(theme.brand,12)

@@ -74,6 +74,35 @@ int main(int argc, char **argv) {
         timing[1] = {10, 2};
         Check(AdaptiveTiming::Preferred(timing, 5, 15, 60) == 20, "adaptive timing");
         Check(AdaptiveTiming::Preferred(timing, 5, 30, 60) == 90, "minimum lead");
+        {
+            AppState basic;
+            basic.Execute({{"action", "save_event"}, {"now", start - 300}, {"event", event}});
+            auto saved = basic.Save();
+            saved["timing"][event.id] = timing;
+            AppState subscriptionScoped(saved);
+            const auto fixedView = subscriptionScoped.View(start - 180);
+            const auto fixed = fixedView["events"][0]["start"].get<Minute>();
+            Check(fixed == start, "event start unchanged for fixed reminders");
+            auto bringFire = [&](const nlohmann::json &view) {
+                for (const auto &plan : view.at("notifications"))
+                    if (plan.at("id").get<std::string>().find(":bring") != std::string::npos)
+                        return plan.at("fireAt").get<Minute>();
+                throw std::runtime_error("expected bring reminder");
+            };
+            Check(bringFire(fixedView) == start - 60, "Free keeps fixed reminder lead with learned history");
+            Check(!subscriptionScoped.Save().at("adaptiveTimingEnabled").get<bool>(),
+                  "adaptive timing defaults off while response history persists");
+            subscriptionScoped.Execute({{"action", "adaptive_timing"}, {"now", start - 180}, {"enabled", true}});
+            Check(subscriptionScoped.Save().at("adaptiveTimingEnabled").get<bool>(), "adaptive timing can be enabled");
+            Check(bringFire(subscriptionScoped.View(start - 180)) == start - 20,
+                  "Pro uses learned reminder lead");
+            AppState reopened(subscriptionScoped.Save());
+            Check(reopened.Save().at("adaptiveTimingEnabled").get<bool>(), "adaptive setting survives reload");
+            reopened.Execute({{"action", "adaptive_timing"}, {"now", start - 180}, {"enabled", false}});
+            Check(!reopened.Save().at("adaptiveTimingEnabled").get<bool>(), "adaptive timing can be disabled");
+            Check(bringFire(reopened.View(start - 180)) == start - 60,
+                  "ending Pro use returns to fixed reminder lead");
+        }
 
         // --- NotificationPlanEngine: focused unit coverage of plan assembly ---
         {
