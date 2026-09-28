@@ -92,14 +92,18 @@ int main(int argc, char **argv) {
             Check(bringFire(fixedView) == start - 60, "Free keeps fixed reminder lead with learned history");
             Check(!subscriptionScoped.Save().at("adaptiveTimingEnabled").get<bool>(),
                   "adaptive timing defaults off while response history persists");
-            subscriptionScoped.Execute({{"action", "adaptive_timing"}, {"now", start - 180}, {"enabled", true}});
-            Check(subscriptionScoped.Save().at("adaptiveTimingEnabled").get<bool>(), "adaptive timing can be enabled");
+            subscriptionScoped.Execute(
+                {{"action", "adaptive_timing"}, {"now", start - 180}, {"enabled", true}});
+            Check(subscriptionScoped.Save().at("adaptiveTimingEnabled").get<bool>(),
+                  "adaptive timing can be enabled");
             Check(bringFire(subscriptionScoped.View(start - 180)) == start - 20,
                   "Pro uses learned reminder lead");
             AppState reopened(subscriptionScoped.Save());
-            Check(reopened.Save().at("adaptiveTimingEnabled").get<bool>(), "adaptive setting survives reload");
+            Check(reopened.Save().at("adaptiveTimingEnabled").get<bool>(),
+                  "adaptive setting survives reload");
             reopened.Execute({{"action", "adaptive_timing"}, {"now", start - 180}, {"enabled", false}});
-            Check(!reopened.Save().at("adaptiveTimingEnabled").get<bool>(), "adaptive timing can be disabled");
+            Check(!reopened.Save().at("adaptiveTimingEnabled").get<bool>(),
+                  "adaptive timing can be disabled");
             Check(bringFire(reopened.View(start - 180)) == start - 60,
                   "ending Pro use returns to fixed reminder lead");
         }

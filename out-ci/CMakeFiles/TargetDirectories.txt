@@ -1,0 +1,6 @@
+D:/github/ship-a-thon/out-ci/CMakeFiles/memory_core.dir
+D:/github/ship-a-thon/out-ci/CMakeFiles/core_tests.dir
+D:/github/ship-a-thon/out-ci/CMakeFiles/memory_demo.dir
+D:/github/ship-a-thon/out-ci/CMakeFiles/test.dir
+D:/github/ship-a-thon/out-ci/CMakeFiles/edit_cache.dir
+D:/github/ship-a-thon/out-ci/CMakeFiles/rebuild_cache.dir

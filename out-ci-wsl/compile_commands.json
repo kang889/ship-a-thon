@@ -1,0 +1,38 @@
+[
+{
+  "directory": "/mnt/d/github/ship-a-thon/out-ci-wsl",
+  "command": "/usr/bin/clang++-18  -I/mnt/d/github/ship-a-thon/source -isystem /mnt/d/github/ship-a-thon/third_party -std=gnu++20 -fPIC -Wall -Wextra -Wpedantic -Werror -o CMakeFiles/memory_core.dir/source/sim/Engines.cpp.o -c /mnt/d/github/ship-a-thon/source/sim/Engines.cpp",
+  "file": "/mnt/d/github/ship-a-thon/source/sim/Engines.cpp",
+  "output": "CMakeFiles/memory_core.dir/source/sim/Engines.cpp.o"
+},
+{
+  "directory": "/mnt/d/github/ship-a-thon/out-ci-wsl",
+  "command": "/usr/bin/clang++-18  -I/mnt/d/github/ship-a-thon/source -isystem /mnt/d/github/ship-a-thon/third_party -std=gnu++20 -fPIC -Wall -Wextra -Wpedantic -Werror -o CMakeFiles/memory_core.dir/source/sim/ImportEngine.cpp.o -c /mnt/d/github/ship-a-thon/source/sim/ImportEngine.cpp",
+  "file": "/mnt/d/github/ship-a-thon/source/sim/ImportEngine.cpp",
+  "output": "CMakeFiles/memory_core.dir/source/sim/ImportEngine.cpp.o"
+},
+{
+  "directory": "/mnt/d/github/ship-a-thon/out-ci-wsl",
+  "command": "/usr/bin/clang++-18  -I/mnt/d/github/ship-a-thon/source -isystem /mnt/d/github/ship-a-thon/third_party -std=gnu++20 -fPIC -Wall -Wextra -Wpedantic -Werror -o CMakeFiles/memory_core.dir/source/app/AppState.cpp.o -c /mnt/d/github/ship-a-thon/source/app/AppState.cpp",
+  "file": "/mnt/d/github/ship-a-thon/source/app/AppState.cpp",
+  "output": "CMakeFiles/memory_core.dir/source/app/AppState.cpp.o"
+},
+{
+  "directory": "/mnt/d/github/ship-a-thon/out-ci-wsl",
+  "command": "/usr/bin/clang++-18  -I/mnt/d/github/ship-a-thon/source -isystem /mnt/d/github/ship-a-thon/third_party -std=gnu++20 -fPIC -Wall -Wextra -Wpedantic -Werror -o CMakeFiles/memory_core.dir/source/services/FakeBackend.cpp.o -c /mnt/d/github/ship-a-thon/source/services/FakeBackend.cpp",
+  "file": "/mnt/d/github/ship-a-thon/source/services/FakeBackend.cpp",
+  "output": "CMakeFiles/memory_core.dir/source/services/FakeBackend.cpp.o"
+},
+{
+  "directory": "/mnt/d/github/ship-a-thon/out-ci-wsl",
+  "command": "/usr/bin/clang++-18  -I/mnt/d/github/ship-a-thon/source -isystem /mnt/d/github/ship-a-thon/third_party -std=gnu++20 -o CMakeFiles/core_tests.dir/tests/CoreTests.cpp.o -c /mnt/d/github/ship-a-thon/tests/CoreTests.cpp",
+  "file": "/mnt/d/github/ship-a-thon/tests/CoreTests.cpp",
+  "output": "CMakeFiles/core_tests.dir/tests/CoreTests.cpp.o"
+},
+{
+  "directory": "/mnt/d/github/ship-a-thon/out-ci-wsl",
+  "command": "/usr/bin/clang++-18  -I/mnt/d/github/ship-a-thon/source -isystem /mnt/d/github/ship-a-thon/third_party -std=gnu++20 -o CMakeFiles/memory_demo.dir/source/app/main.cpp.o -c /mnt/d/github/ship-a-thon/source/app/main.cpp",
+  "file": "/mnt/d/github/ship-a-thon/source/app/main.cpp",
+  "output": "CMakeFiles/memory_demo.dir/source/app/main.cpp.o"
+}
+]

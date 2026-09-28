@@ -1,0 +1,19 @@
+Start testing: Sep 28 20:21 +08
+----------------------------------------------------------
+1/1 Testing: core_tests
+1/1 Test: core_tests
+Command: "/mnt/d/github/ship-a-thon/out-ci-wsl/core_tests" "/mnt/d/github/ship-a-thon/data"
+Directory: /mnt/d/github/ship-a-thon/out-ci-wsl
+"core_tests" start time: Sep 28 20:21 +08
+Output:
+----------------------------------------------------------
+128 checks passed
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"core_tests" end time: Sep 28 20:21 +08
+"core_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 28 20:21 +08

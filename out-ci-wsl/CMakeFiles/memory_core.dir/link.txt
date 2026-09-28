@@ -1,0 +1,2 @@
+/usr/bin/llvm-ar-18 qc libmemory_core.a CMakeFiles/memory_core.dir/source/sim/Engines.cpp.o CMakeFiles/memory_core.dir/source/sim/ImportEngine.cpp.o CMakeFiles/memory_core.dir/source/app/AppState.cpp.o CMakeFiles/memory_core.dir/source/services/FakeBackend.cpp.o
+/usr/bin/llvm-ranlib-18 libmemory_core.a
