@@ -4,6 +4,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 using namespace memory;
 namespace {
@@ -100,12 +101,43 @@ int main(int argc, char **argv) {
             Check(NotificationPlanEngine::Build({empty}, {}, planNow).empty(),
                   "no plan for empty bring/return lists");
 
-            // Below-High priority is suppressed (checklist only, not a notification).
+            // Every required item is reminded: LOW priority still produces a notification.
             OccurrenceReminders low = full;
             low.backItems = "";
-            low.bringPriority = Priority::Medium;
-            Check(NotificationPlanEngine::Build({low}, {}, planNow).empty(),
-                  "medium priority does not become a notification");
+            low.bringPriority = Priority::Low;
+            auto lowPlans = NotificationPlanEngine::Build({low}, {}, planNow);
+            Check(lowPlans.size() == 1 && lowPlans[0].priority == Priority::Low,
+                  "low priority still produces a bring notification");
+
+            // MEDIUM priority still produces a notification (priority is metadata, not a gate).
+            OccurrenceReminders medium = full;
+            medium.backItems = "";
+            medium.bringPriority = Priority::Medium;
+            auto mediumPlans = NotificationPlanEngine::Build({medium}, {}, planNow);
+            Check(mediumPlans.size() == 1 && mediumPlans[0].priority == Priority::Medium &&
+                      mediumPlans[0].body == "Bring: Charger, Laptop",
+                  "medium priority still produces a bring notification with all items");
+
+            // HIGH and VERY HIGH continue to work and keep their priority metadata.
+            OccurrenceReminders high = full;
+            high.backItems = "";
+            high.bringPriority = Priority::High;
+            Check(NotificationPlanEngine::Build({high}, {}, planNow)[0].priority == Priority::High,
+                  "high priority bring notification retains priority");
+            OccurrenceReminders veryHigh = full;
+            veryHigh.backItems = "";
+            veryHigh.bringPriority = Priority::VeryHigh;
+            Check(NotificationPlanEngine::Build({veryHigh}, {}, planNow)[0].priority == Priority::VeryHigh,
+                  "very high priority bring notification retains priority");
+
+            // Bring Back items are never suppressed by low/medium priority either.
+            OccurrenceReminders back = full;
+            back.bringItems = "";
+            back.returnPriority = Priority::Low;
+            auto backPlans = NotificationPlanEngine::Build({back}, {}, planNow);
+            Check(backPlans.size() == 1 && backPlans[0].id == "lab@20000:return" &&
+                      backPlans[0].priority == Priority::Low,
+                  "low priority bring-back item is still reminded");
 
             // A fire time already in the past is dropped.
             OccurrenceReminders past = full;
@@ -126,10 +158,28 @@ int main(int argc, char **argv) {
             Check(multi.size() == 2 && multi[0].id == "lab@19999:bring" && multi[1].id == "lab@20001:bring",
                   "recurring occurrences remain independent and sorted");
 
-            // Adaptive timing feeds the fire time through unchanged.
+            // The plan's priority metadata is the maximum priority among its bundled items;
+            // the caller passes the already-computed maximum (here VeryHigh) through unchanged.
+            OccurrenceReminders bundled = full;
+            bundled.backItems = "";
+            bundled.bringItems = "Laptop, Calculator, Charger";
+            bundled.bringPriority = Priority::VeryHigh;
+            auto bundledPlan = NotificationPlanEngine::Build({bundled}, {}, planNow);
+            Check(bundledPlan[0].body == "Bring: Laptop, Calculator, Charger" &&
+                      bundledPlan[0].priority == Priority::VeryHigh,
+                  "bundled plan keeps all items and the maximum priority as metadata");
+
+            // AdaptiveTiming still chooses the learned lead once minimum samples exist, and falls
+            // back to bringLead otherwise. It only affects WHEN, never whether the plan exists.
+            std::array<TimingBucket, 5> learned{};
+            learned[3] = {10, 8}; // 15-30 min bucket, representative lead 20
+            Check(AdaptiveTiming::Preferred(learned, 5, 15, 60) == 20, "learned timing chosen after samples");
+            std::array<TimingBucket, 5> sparse{};
+            sparse[3] = {2, 2}; // below minimumSamples
+            Check(AdaptiveTiming::Preferred(sparse, 5, 15, 60) == 60, "fallback bringLead without samples");
             OccurrenceReminders adaptive = full;
             adaptive.backItems = "";
-            adaptive.bringFireAt = start - AdaptiveTiming::Preferred(timing, 5, 15, 60);
+            adaptive.bringFireAt = start - AdaptiveTiming::Preferred(learned, 5, 15, 60);
             Check(NotificationPlanEngine::Build({adaptive}, {}, planNow)[0].fireAt == start - 20,
                   "adaptive lead determines bring fire time");
 
@@ -155,36 +205,60 @@ int main(int argc, char **argv) {
         Check(!ContextEngine::SuggestUmbrella(60, true, weights), "60 percent does not trigger");
         Check(ContextEngine::SuggestUmbrella(61, true, weights), "61 percent triggers");
         Check(!ContextEngine::SuggestUmbrella(75, false, weights), "travel required");
+        // --- Weather window: [preparation start, last event END + 60] ---
+        // event: start .. start+120 (first upcoming). later: start+240 .. start+300 (last).
+        // No timing history -> fallback bringLead 60. nowWeather = start-60, so preparation start
+        // is min(now, firstStart-60) = start-60 = now. Window end = later.end + 60 = start+360.
         const Minute nowWeather = start - 60;
         auto later = event;
         later.id = "last";
         later.title = "Evening class";
         later.start = start + 240;
-        later.end = later.start + 60;
+        later.end = later.start + 60; // ends start+300
         AppState forecastApp;
         forecastApp.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", event}});
         forecastApp.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", later}});
+        // Provide contiguous hourly coverage across the whole window (now .. last end + 60).
         auto forecast = [&](int chance, Minute rainAt) {
             nlohmann::json hours = nlohmann::json::array();
-            for (Minute hour = nowWeather; hour <= later.start; hour += 60)
+            for (Minute hour = nowWeather; hour <= later.end + 60; hour += 60)
                 hours.push_back({{"time", hour}, {"rain_probability", hour == rainAt ? chance : 0}});
             return forecastApp
                 .Execute({{"action", "weather"}, {"now", nowWeather}, {"mock", true}, {"hourly", hours}})
                 .at("view");
         };
+        // Window bounds are reported: start = preparation time, end = last event END + 60.
+        auto bounds = forecast(0, -1);
+        Check(bounds["weatherWindowStart"] == nowWeather, "weather window begins at preparation time");
+        Check(bounds["weatherWindowEnd"] == later.end + 60,
+              "weather window ends 60 minutes after the last event ends");
         auto noUmbrella = forecast(60, start + 120);
         Check(noUmbrella["umbrella"] == false && noUmbrella["todayBring"][0]["name"] == "Charger",
-              "exactly 60 does not add umbrella to bring list");
+              "exactly the threshold does not add umbrella to bring list");
         auto decision = forecast(61, start + 120);
         Check(decision["umbrella"] == true && decision["weatherLastEventStart"] == later.start,
-              "rain before last event triggers");
+              "rain inside the window triggers umbrella");
         Check(decision["todayBring"][0]["name"] == "Umbrella" &&
                   decision["todayBring"][1]["eventTitle"] == "Programming Lab" &&
                   decision["todayBring"].back()["eventTitle"] == "Evening class",
               "umbrella precedes event-labelled daily items");
+        // Umbrella reminder fires at the preparation time (here now+1 since prep already reached).
+        for (const auto &plan : decision["notifications"])
+            if (plan.at("id") == "weather@20000:bring")
+                Check(plan.at("fireAt") == nowWeather + 1,
+                      "umbrella reminder fires at/after preparation time");
         Check(std::any_of(decision["notifications"].begin(), decision["notifications"].end(),
                           [](const auto &plan) { return plan.at("id") == "weather@20000:bring"; }),
               "rain schedules bring umbrella reminder");
+        // Rain at the last event's end hour is inside the [prep, end+60] window -> umbrella required.
+        Check(forecast(90, later.end)["umbrella"] == true,
+              "rain within 60 minutes after the last event triggers umbrella");
+        // Rain at end+60 (the window's exclusive upper bound) is outside -> ignored, window still covered.
+        Check(forecast(90, later.end + 60)["umbrella"] == false,
+              "rain beyond last event end + 60 does not trigger umbrella");
+        // Rain during the preparation window (before the first event) -> umbrella required.
+        Check(forecast(90, nowWeather)["umbrella"] == true,
+              "rain during preparation window triggers umbrella");
         auto packedUmbrella =
             forecastApp.Execute({{"action", "umbrella_packed"}, {"now", nowWeather}, {"packed", true}})
                 .at("view");
@@ -196,12 +270,9 @@ int main(int argc, char **argv) {
               "umbrella packed state persists for today");
         Check(decision["weatherRainProbability"] == 61 && decision["weatherCovered"] == true,
               "weather context reports rule inputs");
-        Check(forecast(90, later.start)["umbrella"] == false, "rain after last event ignored");
-        Check(forecast(61, nowWeather)["umbrella"] == true, "current forecast hour included");
-        Check(forecastApp.View(nowWeather + 15)["umbrella"] == true, "current partial hour included");
-        Check(forecastApp.View(later.start)["umbrella"] == false, "last event has begun");
         Check(forecastApp.View(nowWeather + 61)["weatherChecked"] == false, "stale forecast expires");
-        Check(AppState().View(nowWeather)["umbrella"] == false, "no event today");
+        Check(AppState().View(nowWeather)["umbrella"] == false, "no event today means no umbrella");
+        // Incomplete coverage of the window must stay conservative and not guess.
         AppState partialForecast;
         partialForecast.Execute({{"action", "save_event"}, {"now", nowWeather}, {"event", later}});
         auto incomplete = partialForecast.Execute(
@@ -212,6 +283,54 @@ int main(int argc, char **argv) {
               "partial forecast must not guess");
         partialForecast.Execute({{"action", "weather_clear"}, {"now", nowWeather}});
         Check(partialForecast.View(nowWeather)["weatherChecked"] == false, "unavailable clears forecast");
+
+        // --- End-to-end: a brand-new event with only low/medium-risk items still notifies ---
+        // No forget history exists, so risk is low; the required items must still be reminded.
+        Event fresh;
+        fresh.id = "fresh";
+        fresh.title = "Tutorial";
+        fresh.start = start;
+        fresh.end = start + 60;
+        fresh.repeatDays = 0;
+        fresh.items = {{"laptop", "Laptop", .2}, {"calc", "Calculator", .5}};
+        AppState newEvent;
+        newEvent.Execute({{"action", "save_event"}, {"now", start - 120}, {"event", fresh}});
+        const auto freshView = newEvent.View(start - 120);
+        // Fallback lead is 60 min -> the bring reminder fires at start - 60.
+        bool bringFound = false;
+        for (const auto &plan : freshView["notifications"]) {
+            if (plan.at("id") == "fresh@" + std::to_string(day) + ":bring") {
+                bringFound = true;
+                const std::string body = plan.at("body");
+                Check(body.find("Laptop") != std::string::npos &&
+                          body.find("Calculator") != std::string::npos,
+                      "new-event bring notification includes every required item");
+                Check(plan.at("fireAt") == fresh.start - 60, "new-event bring fires at fallback lead");
+            }
+        }
+        Check(bringFound, "brand-new low/medium-risk event still produces a bring notification");
+        // The two items appear in the checklist regardless of their low priority.
+        Check(freshView["todayBring"].size() == 2, "all required items appear in the checklist");
+
+        // Bring Back at low risk is still reminded end-to-end.
+        AppState bringBack;
+        bringBack.Execute({{"action", "save_event"}, {"now", start - 120}, {"event", fresh}});
+        const auto freshKey = "fresh@" + std::to_string(day);
+        for (const auto &target : {"PACKED", "BROUGHT"})
+            bringBack.Execute({{"action", "transition"},
+                               {"now", start},
+                               {"occurrence", freshKey},
+                               {"item", "laptop"},
+                               {"target", target}});
+        bool returnFound = false;
+        const auto bringBackView = bringBack.View(start);
+        for (const auto &plan : bringBackView["notifications"])
+            if (plan.at("id") == freshKey + ":return") {
+                returnFound = true;
+                Check(std::string(plan.at("body")).find("Laptop") != std::string::npos,
+                      "low-risk brought item is still in the bring-back notification");
+            }
+        Check(returnFound, "low-risk bring-back item is not suppressed end-to-end");
         auto recurring = event;
         recurring.id = "repeat";
         recurring.items = {{"laptop", "Laptop", .8, -1}, {"shoes", "Shoes", .8, day}};
@@ -308,6 +427,252 @@ int main(int argc, char **argv) {
         auto corrupted = saved;
         corrupted["states"].begin().value() = "INVALID";
         Rejects([&] { AppState invalid(corrupted); }, "corrupt lifecycle is rejected instead of reset");
+
+        // ============================================================================
+        // Regression: corrected weather window start (max, not min) + late Bring fallback
+        // ============================================================================
+        {
+            const Minute wDay = 21000;
+            // Build one AppState per scenario with a single event and a forecast applied at `now`.
+            // A helper returns the resulting view. Fallback lead is 60 (no timing history).
+            auto setup = [&](Minute evStart, Minute evEnd) {
+                auto app = std::make_shared<AppState>();
+                Event e;
+                e.id = "w";
+                e.title = "Class";
+                e.start = evStart;
+                e.end = evEnd;
+                e.repeatDays = 0;
+                app->Execute({{"action", "save_event"}, {"now", evStart - 600}, {"event", e}});
+                return app;
+            };
+            // Apply a forecast covering [from, to] hourly, with `chance` at hour `rainAt` (0 elsewhere).
+            auto applyWeather = [&](AppState &app, Minute now, Minute from, Minute to, int chance,
+                                    Minute rainAt) {
+                nlohmann::json hours = nlohmann::json::array();
+                for (Minute h = from; h <= to; h += 60)
+                    hours.push_back({{"time", h}, {"rain_probability", h == rainAt ? chance : 0}});
+                return app.Execute({{"action", "weather"}, {"now", now}, {"mock", true}, {"hourly", hours}})
+                    .at("view");
+            };
+
+            // Event 10:00-11:00 -> start = wDay*1440 + 600, end = +660. Fallback lead 60 -> prep 09:00.
+            const Minute evStart = wDay * 1440 + 600, evEnd = wDay * 1440 + 660;
+            const Minute prep = evStart - 60; // 09:00
+
+            // CASE 1: now 08:00 (before prep) -> window start = prep (09:00), NOT now.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480; // 08:00
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 0, -1);
+                Check(v["weatherWindowStart"].get<Minute>() == prep,
+                      "weather window starts at preparation time when now is before it");
+            }
+            // CASE 2: now 09:30 (after prep) -> window start = now, not the earlier prep time.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 570; // 09:30
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 0, -1);
+                Check(v["weatherWindowStart"].get<Minute>() == now,
+                      "weather window starts at now when preparation time already passed");
+            }
+            // CASE 3: window end = last event END + 60.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480;
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 0, -1);
+                Check(v["weatherWindowEnd"].get<Minute>() == evEnd + 60,
+                      "weather window ends 60 minutes after the last event ends");
+            }
+            // CASE 4: rain only BEFORE the preparation window (08:00, before prep 09:00) -> no umbrella.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480; // 08:00 (window starts at prep 09:00)
+                auto v = applyWeather(*app, now, now, evEnd + 120, 90, wDay * 1440 + 480);
+                Check(v["umbrella"] == false, "rain before the preparation window does not add umbrella");
+            }
+            // CASE 5: rain inside [prep, lastEnd+60] -> umbrella.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480;
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 90, prep);
+                Check(v["umbrella"] == true,
+                      "rain inside the preparation-to-last-end+60 window adds umbrella");
+            }
+            // CASE 6: rain during the 60-minute post-last-event period (at evEnd) -> umbrella.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480;
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 90, evEnd);
+                Check(v["umbrella"] == true, "rain within 60 minutes after the last event adds umbrella");
+            }
+            // CASE 7: rain at the exclusive upper boundary (evEnd+60) -> no umbrella (interval semantics).
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480;
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 90, evEnd + 60);
+                Check(v["umbrella"] == false,
+                      "rain at/after the exclusive window boundary does not add umbrella");
+            }
+            // CASE 8: forecast known before prep -> umbrella reminder fires at preparation time.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480; // 08:00, prep 09:00 still future
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 90, prep);
+                bool found = false;
+                for (const auto &p : v["notifications"])
+                    if (p.at("id") == "weather@" + std::to_string(wDay) + ":bring") {
+                        found = true;
+                        Check(p.at("fireAt").get<Minute>() == prep,
+                              "umbrella reminder fires at preparation time when it is still future");
+                    }
+                Check(found, "umbrella reminder scheduled when rain known before preparation");
+            }
+            // CASE 9: forecast actionable AFTER prep -> umbrella reminder fires at now + 1.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 570; // 09:30, prep 09:00 already passed
+                auto v = applyWeather(*app, now, now - 120, evEnd + 120, 90, now);
+                bool found = false;
+                for (const auto &p : v["notifications"])
+                    if (p.at("id") == "weather@" + std::to_string(wDay) + ":bring") {
+                        found = true;
+                        Check(p.at("fireAt").get<Minute>() == now + 1,
+                              "umbrella reminder fires promptly (now+1) when preparation already passed");
+                    }
+                Check(found, "umbrella reminder scheduled promptly after preparation passed");
+            }
+            // CASE 10: packed umbrella -> no duplicate umbrella reminder.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480;
+                applyWeather(*app, now, now - 120, evEnd + 120, 90, prep);
+                auto v =
+                    app->Execute({{"action", "umbrella_packed"}, {"now", now}, {"packed", true}}).at("view");
+                Check(v["todayBring"][0]["state"] == "PACKED" &&
+                          std::none_of(v["notifications"].begin(), v["notifications"].end(),
+                                       [&](const auto &p) {
+                                           return p.at("id") == "weather@" + std::to_string(wDay) + ":bring";
+                                       }),
+                      "packed umbrella schedules no duplicate reminder");
+            }
+            // CASE 11: no remaining/relevant event today -> no umbrella (query after the event ends).
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = evEnd + 30; // event already finished
+                auto v = applyWeather(*app, now, now - 120, now + 240, 90, now + 60);
+                Check(v["umbrella"] == false, "no remaining relevant event means no umbrella");
+            }
+            // CASE 12: incomplete forecast coverage of the window -> conservative, no umbrella.
+            {
+                auto app = setup(evStart, evEnd);
+                const Minute now = wDay * 1440 + 480;
+                // Only one hour provided -> window not fully covered.
+                auto v = app->Execute({{"action", "weather"},
+                                       {"now", now},
+                                       {"hourly",
+                                        nlohmann::json::array({{{"time", prep}, {"rain_probability", 95}}})}})
+                             .at("view");
+                Check(v["umbrella"] == false && v["weatherCovered"] == false,
+                      "incomplete forecast coverage stays conservative");
+            }
+
+            // ---- Late / missed Bring reminder ----
+            // Event 18:00-19:00, fallback lead 60 -> intended bring 17:00.
+            const Minute bStart = wDay * 1440 + 1080, bEnd = wDay * 1440 + 1140;
+            const Minute intended = bStart - 60; // 17:00
+            auto bringApp = [&]() {
+                auto app = std::make_shared<AppState>();
+                Event e;
+                e.id = "w";
+                e.title = "Class";
+                e.start = bStart;
+                e.end = bEnd;
+                e.repeatDays = 0;
+                e.items = {{"laptop", "Laptop", .5}};
+                app->Execute({{"action", "save_event"}, {"now", bStart - 600}, {"event", e}});
+                return app;
+            };
+            auto bringPlan = [&](Minute now) -> nlohmann::json {
+                auto app = bringApp();
+                const auto view = app->View(now);
+                for (const auto &p : view["notifications"])
+                    if (p.at("id") == "w@" + std::to_string(wDay) + ":bring")
+                        return p;
+                return nullptr;
+            };
+            // CASE 13: now < intended -> fire time stays intended.
+            {
+                auto p = bringPlan(wDay * 1440 + 900); // 15:00 < 17:00
+                Check(!p.is_null() && p.at("fireAt").get<Minute>() == intended,
+                      "bring reminder fires at intended time when it is still future");
+            }
+            // CASE 14: now == intended -> schedule promptly at now + 1.
+            {
+                auto p = bringPlan(intended);
+                Check(!p.is_null() && p.at("fireAt").get<Minute>() == intended + 1,
+                      "bring reminder fires promptly when now equals the intended time");
+            }
+            // CASE 15: intended < now < start -> schedule promptly at now + 1.
+            {
+                const Minute now = wDay * 1440 + 1050; // 17:30, between 17:00 and 18:00
+                auto p = bringPlan(now);
+                Check(!p.is_null() && p.at("fireAt").get<Minute>() == now + 1,
+                      "late-added item before start fires promptly at now+1");
+            }
+            // CASE 16: now >= start -> no initial Bring reminder.
+            {
+                auto p = bringPlan(bStart); // exactly at start
+                Check(p.is_null(), "no initial bring reminder once the event has started");
+            }
+            // CASE 17: the late fallback still includes ALL needed items regardless of priority.
+            {
+                auto app = std::make_shared<AppState>();
+                Event e;
+                e.id = "w";
+                e.title = "Class";
+                e.start = bStart;
+                e.end = bEnd;
+                e.repeatDays = 0;
+                e.items = {{"laptop", "Laptop", .1}, {"calc", "Calculator", .5}};
+                app->Execute({{"action", "save_event"}, {"now", bStart - 600}, {"event", e}});
+                const Minute now = wDay * 1440 + 1050; // 17:30 late
+                nlohmann::json p = nullptr;
+                const auto lateView = app->View(now);
+                for (const auto &plan : lateView["notifications"])
+                    if (plan.at("id") == "w@" + std::to_string(wDay) + ":bring")
+                        p = plan;
+                Check(!p.is_null(), "late low/medium-risk bring still notifies");
+                const std::string body = p.at("body");
+                Check(body.find("Laptop") != std::string::npos &&
+                          body.find("Calculator") != std::string::npos,
+                      "late bring fallback still bundles every needed item");
+                Check(p.at("fireAt").get<Minute>() == now + 1, "late bring fallback fires at now+1");
+            }
+            // CASE 18: the late fallback does NOT mutate AdaptiveTiming history.
+            {
+                auto app = bringApp();
+                app->View(wDay * 1440 + 1050); // trigger a late fallback bring
+                // No transitions occurred, so timing history must be absent from saved state.
+                const auto saved2 = app->Save();
+                Check(!saved2.contains("timing") || saved2.at("timing").empty(),
+                      "late bring fallback does not create AdaptiveTiming history");
+            }
+            // CASE 19: normal learned AdaptiveTiming still chooses the learned lead.
+            {
+                std::array<TimingBucket, 5> learned{};
+                learned[3] = {10, 8}; // 15-30 min bucket -> lead 20
+                Check(AdaptiveTiming::Preferred(learned, 5, 15, 60) == 20,
+                      "learned adaptive timing still returns the learned lead");
+            }
+            // CASE 20: normal fallback bringLead still applies without sufficient history.
+            {
+                std::array<TimingBucket, 5> sparse{};
+                sparse[3] = {2, 2};
+                Check(AdaptiveTiming::Preferred(sparse, 5, 15, 60) == 60,
+                      "fallback bringLead still applies without sufficient history");
+            }
+        }
         if (argc > 1) {
             std::ifstream config(std::string(argv[1]) + "/reminder_weights.json");
             const auto configured = nlohmann::json::parse(config).get<Weights>();

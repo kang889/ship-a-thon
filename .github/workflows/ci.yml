@@ -42,3 +42,45 @@ jobs:
         with:
           name: student-memory-debug
           path: platform/android/app/build/outputs/apk/debug/app-debug.apk
+
+  android-smoke:
+    # Lightweight smoke test: reuse the APK built by the `android` job, install it on a
+    # single emulator, launch PackBack and confirm it does not crash on startup.
+    # Runs only on pull requests and on the main branch; skipped for pushes to other
+    # branches (e.g. kang) to keep those pushes fast.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    needs: android
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the repo so .github/scripts/android-smoke.sh is available in the workspace.
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download the APK built by CI
+        uses: actions/download-artifact@v4
+        with:
+          name: student-memory-debug
+          path: apk
+
+      - name: Launch emulator and smoke-test the APK
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          # Matches the project's compileSdk/targetSdk 35; x86_64 matches the ABI the
+          # native library ships (abiFilters arm64-v8a, x86_64) so JNI loads on CI.
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: bash .github/scripts/android-smoke.sh

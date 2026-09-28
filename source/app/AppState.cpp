@@ -387,11 +387,20 @@ Json AppState::View(Minute now) const {
                           {"overlap", overlap},
                           {"items", items}});
         const auto normal = mTemplates.value("NORMAL", Json::object());
+        // AdaptiveTiming decides the INTENDED bring time. If that moment has already passed but
+        // the event has not started (late-added item/event, app reopened, refresh past the minute),
+        // fall back to firing promptly (now + 1) so the reminder is still delivered. Once the event
+        // has started there is no initial Bring reminder. This late fallback never feeds AdaptiveTiming.
+        const Minute intendedBring = occurrence.start - lead;
+        const Minute bringFireAt = now < intendedBring ? intendedBring
+                                   : now < occurrence.start
+                                       ? now + 1
+                                       : intendedBring; // in the past; dropped by the engine
         // Hand the deterministic per-occurrence results to the plan engine; it owns
         // how these become the actual bring/return notifications.
         reminderInputs.push_back({occurrence.key, occurrence.event.title, bring, back,
                                   normal.value("bring", "Bring: "),
-                                  normal.value("return", "Before you go, check: "), occurrence.start - lead,
+                                  normal.value("return", "Before you go, check: "), bringFireAt,
                                   occurrence.end - mWeights.returnLead, maxBring, maxReturn});
     }
     for (const auto &event : mEvents) {
@@ -415,46 +424,77 @@ Json AppState::View(Minute now) const {
     }
     const auto today = now / 1440;
 
+    // Weather window bounds for today's events. A relevant event is one today that has
+    // not finished yet (end > now); the first such event defines the preparation time.
+    //   calculatedPreparationTime = first relevant event's start minus its reminder lead
+    //                               (AdaptiveTiming preferred lead, else fallback bringLead).
+    //   WEATHER_WINDOW_START = max(now, calculatedPreparationTime)  (never in the past).
+    //   WEATHER_WINDOW_END   = last relevant event's END + 60 minutes.
+    // Umbrella is only ever considered when there is a relevant event today.
     bool hasEventToday = false;
+    bool hasRelevantEvent = false;
     Minute lastEventStart = 0;
+    Minute lastEventEnd = 0;
+    Minute firstRelevantStart = 0;
+    int firstRelevantLead = mWeights.bringLead;
     std::string lastEventTitle;
 
     for (const auto &occurrence : occurrences) {
         if (occurrence.start / 1440 != today)
             continue;
-
         if (!hasEventToday || occurrence.start > lastEventStart) {
             lastEventStart = occurrence.start;
             lastEventTitle = occurrence.event.title;
         }
-
+        if (!hasEventToday || occurrence.end > lastEventEnd)
+            lastEventEnd = occurrence.end;
+        // The first not-yet-finished event of the remaining day drives preparation. Occurrences
+        // are ordered by start, so the earliest qualifying one is captured first.
+        if (occurrence.end > now && (!hasRelevantEvent || occurrence.start < firstRelevantStart)) {
+            firstRelevantStart = occurrence.start;
+            const auto timing = mTiming.find(occurrence.event.id);
+            firstRelevantLead = timing == mTiming.end()
+                                    ? mWeights.bringLead
+                                    : AdaptiveTiming::Preferred(timing->second, mWeights.minimumSamples, 15,
+                                                                mWeights.bringLead);
+            hasRelevantEvent = true;
+        }
         hasEventToday = true;
     }
 
-    int relevantRainProbability = -1;
+    // Preparation time before the first relevant event; the evaluation window never starts in
+    // the past, so a completed earlier event cannot push it backwards.
+    const Minute preparationTime = hasRelevantEvent ? firstRelevantStart - firstRelevantLead : now;
+    const Minute weatherWindowStart = std::max(now, preparationTime);
+    const Minute weatherWindowEnd = hasRelevantEvent ? lastEventEnd + 60 : 0;
 
-    const bool upcoming = hasEventToday && lastEventStart > now;
+    int relevantRainProbability = -1;
     const bool fresh = mWeatherAt > 0 && mWeatherAt <= now && now - mWeatherAt <= 60;
-    const bool covered =
-        upcoming && fresh && ContextEngine::CoversWindow(mHourlyWeather, now, lastEventStart);
+    // Evaluate rain from the (non-past) preparation time through 60 minutes after the last event.
+    const bool covered = hasRelevantEvent && weatherWindowEnd > weatherWindowStart && fresh &&
+                         ContextEngine::CoversWindow(mHourlyWeather, weatherWindowStart, weatherWindowEnd);
     if (covered)
-        relevantRainProbability = ContextEngine::MaxRainProbability(mHourlyWeather, now, lastEventStart);
+        relevantRainProbability =
+            ContextEngine::MaxRainProbability(mHourlyWeather, weatherWindowStart, weatherWindowEnd);
 
     const bool umbrella =
-        covered && ContextEngine::SuggestUmbrella(relevantRainProbability, upcoming, mWeights);
+        covered && ContextEngine::SuggestUmbrella(relevantRainProbability, hasRelevantEvent, mWeights);
 
     UmbrellaReminder umbrellaPlan;
     Json todayBring = Json::array();
     if (umbrella) {
         todayBring.push_back({{"id", "weather-umbrella"},
                               {"name", "Umbrella"},
-                              {"eventTitle", "Rain before today's last event"},
+                              {"eventTitle", "Rain around today's events"},
                               {"eventStart", 0},
                               {"occurrence", ""},
                               {"state", mUmbrellaPackedDay == today ? "PACKED" : "NEEDED"},
                               {"weather", true}});
-        umbrellaPlan = {mUmbrellaPackedDay != today, today, now + 1,
-                        "Bring: Umbrella · rain likely before your last event"};
+        // Remind at the calculated preparation time when it is still in the future; otherwise fire
+        // promptly (now + 1) so weather learned after preparation never schedules an alarm in the past.
+        const Minute umbrellaFireAt = std::max(preparationTime, now + 1);
+        umbrellaPlan = {mUmbrellaPackedDay != today, today, umbrellaFireAt,
+                        "Bring: Umbrella · rain likely around today's events"};
     }
     for (const auto &occurrence : TimetableEngine::Between(mEvents, today, today)) {
         for (const auto &item : occurrence.event.items) {
@@ -497,8 +537,8 @@ Json AppState::View(Minute now) const {
             {"weatherHasEventToday", hasEventToday},
             {"weatherLastEventTitle", lastEventTitle},
             {"weatherLastEventStart", hasEventToday ? lastEventStart : Minute{0}},
-            {"weatherWindowStart", now},
-            {"weatherWindowEnd", upcoming ? lastEventStart : Minute{0}},
+            {"weatherWindowStart", hasRelevantEvent ? weatherWindowStart : Minute{0}},
+            {"weatherWindowEnd", weatherWindowEnd},
             {"weatherCovered", covered},
             {"weatherRainProbability", relevantRainProbability},
 

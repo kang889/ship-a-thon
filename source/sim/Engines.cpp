@@ -103,11 +103,13 @@ Priority ReminderDecisionEngine::Classify(double risk, const Weights &w) {
 std::vector<Reminder> NotificationPlanEngine::Build(const std::vector<OccurrenceReminders> &occurrences,
                                                     const UmbrellaReminder &umbrella, Minute now) {
     std::vector<Reminder> plans;
-    // Only actionable, high-enough reminders that have not already passed become
-    // plans; empty bring/return lists never produce a spurious notification.
+    // Every still-actionable required item is reminded. Priority is retained as
+    // metadata (the maximum among the bundled items) and never gates whether the
+    // reminder exists. Empty item lists and already-past fire times still produce
+    // no notification.
     const auto addPlan = [&](const std::string &id, const std::string &title, const std::string &prefix,
                              const std::string &items, Minute fire, Priority priority) {
-        if (items.empty() || fire < now || priority < Priority::High)
+        if (items.empty() || fire < now)
             return;
         plans.push_back({id, title, prefix + items, fire, priority});
     };
