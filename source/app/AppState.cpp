@@ -272,6 +272,22 @@ Json AppState::Execute(const Json &command) {
             else
                 *found = event;
         }
+    } else if (action == "cloud_hydrate") {
+        // Additive, idempotent cross-device hydration from the backend. Validate every incoming
+        // event BEFORE touching local state so a malformed payload cannot partially mutate it.
+        const auto incoming = command.at("events").get<std::vector<Event>>();
+        if (incoming.size() > 1000)
+            throw std::invalid_argument("Too many cloud events to hydrate.");
+        for (const auto &event : incoming)
+            EventEngine::Validate(event);
+        // Add only events whose ID is not already present. Existing local events are preserved
+        // as-is (no overwrite), which keeps hydration non-destructive and idempotent.
+        for (const auto &event : incoming) {
+            const bool exists =
+                std::any_of(mEvents.begin(), mEvents.end(), [&](const auto &e) { return e.id == event.id; });
+            if (!exists)
+                mEvents.push_back(event);
+        }
     } else if (action == "save_event") {
         const auto event = command.at("event").get<Event>();
         EventEngine::Validate(event);
