@@ -1,6 +1,8 @@
 #include "sim/Engines.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <map>
 #include <set>
 #include <stdexcept>
 
@@ -82,6 +84,10 @@ bool ItemLifecycleEngine::CanTransition(ItemState from, ItemState to) {
 bool ItemLifecycleEngine::ShouldReturn(ItemState state) {
     return state == ItemState::Brought || state == ItemState::InUse || state == ItemState::NeedsToReturn;
 }
+bool ItemLifecycleEngine::ShouldBringBackFromClass(ItemState state) {
+    // Class-exit superset: PACKED is sufficient evidence the item was brought for the outing.
+    return state == ItemState::Packed || ShouldReturn(state);
+}
 double ForgetRiskEngine::Score(const ForgetStats &stats, double importance, bool unusual, double urgency,
                                const Weights &w) {
     const auto count = stats.forgotten + stats.returned;
@@ -146,6 +152,89 @@ std::optional<Minute> PrepScheduler::FindSlot(Minute now, Minute deadline, int d
             return std::nullopt;
     }
     return candidate + duration <= deadline ? std::optional<Minute>(candidate) : std::nullopt;
+}
+std::string DailyOutingEngine::Normalize(const std::string &name) {
+    std::size_t begin = 0, end = name.size();
+    while (begin < end && std::isspace(static_cast<unsigned char>(name[begin])))
+        ++begin;
+    while (end > begin && std::isspace(static_cast<unsigned char>(name[end - 1])))
+        --end;
+    std::string result = name.substr(begin, end - begin);
+    std::transform(result.begin(), result.end(), result.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return result;
+}
+namespace {
+// Progress rank along the packing lifecycle. Higher means further along. Terminal states that do
+// not represent "carried with me" (Forgotten, NotNeeded) rank at/below Needed so they never make a
+// daily item look packed. Used only to pick the representative daily state (the least-progressed
+// applicable requirement) — it is not a lifecycle-validity decision.
+int ProgressRank(ItemState state) {
+    switch (state) {
+    case ItemState::NotNeeded:
+        return -1;
+    case ItemState::Forgotten:
+        return 0;
+    case ItemState::Needed:
+        return 0;
+    case ItemState::Packed:
+        return 1;
+    case ItemState::Brought:
+        return 2;
+    case ItemState::InUse:
+        return 3;
+    case ItemState::NeedsToReturn:
+        return 4;
+    case ItemState::Safe:
+        return 5;
+    }
+    return 0;
+}
+} // namespace
+ItemState DailyOutingEngine::DailyState(const std::vector<ItemState> &states) {
+    // The daily item is only as "done" as its least-progressed applicable requirement, so the user
+    // sees "to pack" until every same-day occurrence of that physical item is at least packed.
+    // NotNeeded requirements are ignored (they impose no packing obligation); if every underlying
+    // requirement is NotNeeded the daily item is NotNeeded.
+    ItemState representative = ItemState::Safe;
+    bool any = false;
+    for (const auto state : states) {
+        if (state == ItemState::NotNeeded)
+            continue;
+        any = true;
+        if (ProgressRank(state) < ProgressRank(representative))
+            representative = state;
+    }
+    return any ? representative : ItemState::NotNeeded;
+}
+std::vector<DailyOutingEngine::DailyItem>
+DailyOutingEngine::Aggregate(const std::vector<Contribution> &contributions) {
+    std::vector<DailyItem> items;
+    std::map<std::string, std::size_t> index;
+    std::map<std::string, std::vector<ItemState>> statesByKey;
+    for (const auto &contribution : contributions) {
+        const auto normalized = Normalize(contribution.name);
+        auto found = index.find(normalized);
+        if (found == index.end()) {
+            found = index.emplace(normalized, items.size()).first;
+            DailyItem item;
+            item.normalized = normalized;
+            item.name = contribution.name; // preserve first-seen original spelling
+            items.push_back(item);
+        }
+        auto &item = items[found->second];
+        ++item.count;
+        item.priority = std::max(item.priority, contribution.priority);
+        // Track distinct event titles (first-seen order) so the UI can explain why it is needed.
+        if (!contribution.title.empty() &&
+            std::find(item.titles.begin(), item.titles.end(), contribution.title) == item.titles.end())
+            item.titles.push_back(contribution.title);
+        item.sources.emplace_back(contribution.occurrenceKey, contribution.itemId);
+        statesByKey[normalized].push_back(contribution.state);
+    }
+    for (auto &item : items)
+        item.state = DailyState(statesByKey[item.normalized]);
+    return items;
 }
 int AdaptiveTiming::Bucket(int lead) {
     if (lead > 120)

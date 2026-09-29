@@ -252,9 +252,15 @@ class MainActivity : Activity() {
             val item = todayBring.getJSONObject(i)
             val packed = item.getString("state") in setOf("PACKED","BROUGHT","IN_USE","NEEDS_TO_RETURN","SAFE")
             val weatherItem = item.optBoolean("weather")
+            // The whole school day is one outing: a daily item is deduplicated across every class
+            // that needs it. Explain "why" with the class count when more than one class requires it,
+            // otherwise name the single class. Weather umbrella keeps its own day-level explanation.
+            val count = item.optInt("count", 1)
             val reason = if (weatherItem) {
                 "Rain likely before your last event" +
                     (if (view.optBoolean("weatherMock")) " · demo weather" else "")
+            } else if (item.optBoolean("dayItem") && count > 1) {
+                "Needed for $count classes"
             } else "${item.getString("eventTitle")} · ${time(item.getLong("eventStart"))}"
             val onTap: (() -> Unit)? = if (weatherItem) ({
                 run(JSONObject().put("action", "umbrella_packed").put("packed", !packed))
@@ -264,8 +270,15 @@ class MainActivity : Activity() {
                     val labels = Array(actions.length()) { actions.getString(it).replace('_',' ').lowercase().replaceFirstChar { ch -> ch.uppercase() } }
                     PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(reason)
                         .setItems(labels) { _, index ->
-                            run(JSONObject().put("action", "transition").put("occurrence", item.getString("occurrence"))
-                                .put("item", item.getString("id")).put("target", actions.getString(index)))
+                            // Marking the daily item transitions every same-day occurrence of that
+                            // physical item together; C++ (transition_day) owns the propagation.
+                            if (item.optBoolean("dayItem")) {
+                                run(JSONObject().put("action", "transition_day").put("day", item.getLong("day"))
+                                    .put("name", item.getString("name")).put("target", actions.getString(index)))
+                            } else {
+                                run(JSONObject().put("action", "transition").put("occurrence", item.getString("occurrence"))
+                                    .put("item", item.getString("id")).put("target", actions.getString(index)))
+                            }
                         }.show()
                 })
             }
@@ -307,7 +320,14 @@ class MainActivity : Activity() {
                 for (j in 0 until items.length()) {
                     val item = items.getJSONObject(j)
                     val actions = item.getJSONArray("actions")
-                    val updateItem: (() -> Unit)? = if (actions.length() > 0) ({
+                    // Class-exit: when C++ marks the item returnable (PACKED/BROUGHT/IN_USE/
+                    // NEEDS_TO_RETURN), one tap confirms "I have this leaving this class" via the
+                    // C++ return_item command — no walking the lifecycle by hand. Otherwise fall
+                    // back to the ordinary per-occurrence transition menu. All rules stay in C++.
+                    val updateItem: (() -> Unit)? = if (item.optBoolean("canReturn")) ({
+                        run(JSONObject().put("action", "return_item").put("occurrence", event.getString("key"))
+                            .put("item", item.getString("id")))
+                    }) else if (actions.length() > 0) ({
                         val labels = Array(actions.length()) { actions.getString(it).replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() } }
                         PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(item.getString("reason")).setItems(labels) { _, index ->
                             run(JSONObject().put("action", "transition").put("occurrence", event.getString("key"))

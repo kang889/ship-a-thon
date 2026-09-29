@@ -271,10 +271,14 @@ int main(int argc, char **argv) {
         auto decision = forecast(61, start + 120);
         Check(decision["umbrella"] == true && decision["weatherLastEventStart"] == later.start,
               "rain inside the window triggers umbrella");
+        // Under the one-day-outing model the daily list is deduplicated by normalized name, so the
+        // umbrella still leads and the shared Charger/Laptop each appear once (labelled by the first
+        // requiring class), instead of one row per occurrence.
         Check(decision["todayBring"][0]["name"] == "Umbrella" &&
                   decision["todayBring"][1]["eventTitle"] == "Programming Lab" &&
-                  decision["todayBring"].back()["eventTitle"] == "Evening class",
-              "umbrella precedes event-labelled daily items");
+                  decision["todayBring"].size() == 3 && decision["todayBring"][1]["name"] == "Charger" &&
+                  decision["todayBring"][2]["name"] == "Laptop",
+              "umbrella precedes deduplicated event-labelled daily items");
         // Umbrella reminder fires at the preparation time (here now+1 since prep already reached).
         for (const auto &plan : decision["notifications"])
             if (plan.at("id") == "weather@20000:bring")
@@ -329,10 +333,11 @@ int main(int argc, char **argv) {
         AppState newEvent;
         newEvent.Execute({{"action", "save_event"}, {"now", start - 120}, {"event", fresh}});
         const auto freshView = newEvent.View(start - 120);
-        // Fallback lead is 60 min -> the bring reminder fires at start - 60.
+        // Fallback lead is 60 min -> the bring reminder fires at start - 60. Reminders are now
+        // day-level (one outing per calendar day), so the plan id is keyed by day, not by event.
         bool bringFound = false;
         for (const auto &plan : freshView["notifications"]) {
-            if (plan.at("id") == "fresh@" + std::to_string(day) + ":bring") {
+            if (plan.at("id") == "day@" + std::to_string(day) + ":bring") {
                 bringFound = true;
                 const std::string body = plan.at("body");
                 Check(body.find("Laptop") != std::string::npos &&
@@ -355,6 +360,7 @@ int main(int argc, char **argv) {
                                {"occurrence", freshKey},
                                {"item", "laptop"},
                                {"target", target}});
+        // Bring Back is per-occurrence, so the return reminder id is occurrence-scoped, not day-level.
         bool returnFound = false;
         const auto bringBackView = bringBack.View(start);
         for (const auto &plan : bringBackView["notifications"])
@@ -630,7 +636,7 @@ int main(int argc, char **argv) {
                 auto app = bringApp();
                 const auto view = app->View(now);
                 for (const auto &p : view["notifications"])
-                    if (p.at("id") == "w@" + std::to_string(wDay) + ":bring")
+                    if (p.at("id") == "day@" + std::to_string(wDay) + ":bring")
                         return p;
                 return nullptr;
             };
@@ -673,7 +679,7 @@ int main(int argc, char **argv) {
                 nlohmann::json p = nullptr;
                 const auto lateView = app->View(now);
                 for (const auto &plan : lateView["notifications"])
-                    if (plan.at("id") == "w@" + std::to_string(wDay) + ":bring")
+                    if (plan.at("id") == "day@" + std::to_string(wDay) + ":bring")
                         p = plan;
                 Check(!p.is_null(), "late low/medium-risk bring still notifies");
                 const std::string body = p.at("body");
@@ -792,6 +798,584 @@ int main(int argc, char **argv) {
                 Rejects([&] { hydrate(app, bad); }, "malformed hydration batch is rejected");
                 Check(app.Save().at("events") == before.at("events"),
                       "a malformed hydration batch does not partially mutate local state");
+            }
+        }
+
+        // ============================================================================
+        // One-school-day-as-one-outing: deduplicated daily packing list, single daily
+        // Bring + end-of-day Bring Back reminders, and day-level packed-state propagation.
+        // The daily outing is DERIVED from ordinary events (same records cloud sync carries),
+        // so nothing here changes the event/item schema or the cloud contract.
+        // ============================================================================
+        {
+            const Minute oDay = 30000, oStart = oDay * 1440 + 540; // 09:00
+            // Build three same-day classes. Names use varied spelling/whitespace/casing on purpose.
+            auto classEvent = [&](const std::string &id, const std::string &title, Minute at,
+                                  std::vector<Item> items) {
+                Event e;
+                e.id = id;
+                e.title = title;
+                e.start = at;
+                e.end = at + 60;
+                e.repeatDays = 0;
+                e.items = std::move(items);
+                return e;
+            };
+            // Helper: find a daily item row by display name in todayBring.
+            auto dailyRow = [](const nlohmann::json &view, const std::string &name) -> nlohmann::json {
+                for (const auto &row : view.at("todayBring"))
+                    if (row.at("name") == name)
+                        return row;
+                return nullptr;
+            };
+            auto dayBringBody = [&](const nlohmann::json &view, Minute day) -> std::string {
+                for (const auto &plan : view.at("notifications"))
+                    if (plan.at("id") == "day@" + std::to_string(day) + ":bring")
+                        return plan.at("body").get<std::string>();
+                return {};
+            };
+
+            // TEST 1: three same-day events all require Laptop -> Laptop appears exactly once.
+            {
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("calc", "Calculus", oStart, {{"l1", "Laptop", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("dsa", "DSA", oStart + 180, {{"l2", "Laptop", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("os", "OS", oStart + 360, {{"l3", "Laptop", .5}})}});
+                const auto view = app.View(oStart - 300);
+                int laptopRows = 0;
+                for (const auto &row : view["todayBring"])
+                    if (row["name"] == "Laptop")
+                        ++laptopRows;
+                Check(laptopRows == 1, "three same-day Laptop requirements collapse to one daily item");
+                Check(dailyRow(view, "Laptop")["count"] == 3, "daily Laptop reports all three classes");
+            }
+
+            // TEST 2: "Laptop" + "laptop" + " Laptop " are one daily item (normalized name).
+            {
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("a", "A", oStart, {{"i1", "Laptop", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("b", "B", oStart + 120, {{"i2", "laptop", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("c", "C", oStart + 240, {{"i3", " Laptop ", .5}})}});
+                const auto view = app.View(oStart - 300);
+                int rows = 0;
+                for (const auto &row : view["todayBring"])
+                    ++rows;
+                Check(rows == 1, "case/space variants of Laptop collapse to one daily item");
+                // The preserved display name is the FIRST encountered original spelling.
+                Check(view["todayBring"][0]["name"] == "Laptop", "first-seen spelling is preserved");
+                Check(view["todayBring"][0]["count"] == 3, "all three variants counted as one item");
+            }
+
+            // TEST 3: different items across classes -> union contains all unique items.
+            {
+                AppState app;
+                app.Execute(
+                    {{"action", "save_event"},
+                     {"now", oStart - 300},
+                     {"event",
+                      classEvent("calc", "Calculus", oStart,
+                                 {{"l", "Laptop", .5}, {"p", "iPad", .5}, {"c", "Calculator", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("dsa", "DSA", oStart + 180,
+                                                  {{"l2", "Laptop", .5}, {"p2", "iPad", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("os", "OS", oStart + 360,
+                                                  {{"l3", "Laptop", .5}, {"n", "Notebook", .5}})}});
+                const auto view = app.View(oStart - 300);
+                Check(view["todayBring"].size() == 4, "union has exactly the four distinct items");
+                Check(dailyRow(view, "Laptop")["count"] == 3 && dailyRow(view, "iPad")["count"] == 2 &&
+                          dailyRow(view, "Calculator")["count"] == 1 &&
+                          dailyRow(view, "Notebook")["count"] == 1,
+                      "each daily item reports how many classes need it");
+            }
+
+            // TEST 4: the same item on different calendar days is NOT combined.
+            {
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("today", "Today", oStart, {{"l", "Laptop", .5}})}});
+                app.Execute(
+                    {{"action", "save_event"},
+                     {"now", oStart - 300},
+                     {"event", classEvent("tmrw", "Tomorrow", oStart + 1440, {{"l2", "Laptop", .5}})}});
+                const auto todayView = app.View(oStart - 300);
+                Check(dailyRow(todayView, "Laptop")["count"] == 1,
+                      "today's outing counts only today's Laptop requirement");
+                const auto tomorrowView = app.View(oStart - 300 + 1440);
+                Check(dailyRow(tomorrowView, "Laptop")["count"] == 1,
+                      "tomorrow's outing counts only tomorrow's Laptop requirement");
+            }
+
+            // TEST 5: an onlyDay item is included only on its applicable day.
+            {
+                AppState app;
+                Event e =
+                    classEvent("rep", "Lab", oStart, {{"l", "Laptop", .5, -1}, {"s", "Shoes", .5, oDay}});
+                e.repeatDays = 1; // daily so tomorrow also has an occurrence
+                app.Execute({{"action", "save_event"}, {"now", oStart - 300}, {"event", e}});
+                const auto todayView = app.View(oStart - 300);
+                Check(dailyRow(todayView, "Shoes") != nullptr, "onlyDay Shoes appears on its day");
+                const auto tomorrowView = app.View(oStart - 300 + 1440);
+                Check(dailyRow(tomorrowView, "Shoes") == nullptr, "onlyDay Shoes is absent on other days");
+                Check(dailyRow(tomorrowView, "Laptop") != nullptr,
+                      "the recurring item still appears on other days");
+            }
+
+            // TEST 6: repeating classes aggregate correctly for today's occurrences.
+            {
+                AppState app;
+                Event weekly = classEvent("wk", "Weekly", oStart, {{"l", "Laptop", .5}});
+                weekly.repeatDays = 7;
+                Event weekly2 = classEvent("wk2", "Seminar", oStart + 180, {{"l2", "Laptop", .5}});
+                weekly2.repeatDays = 7;
+                app.Execute({{"action", "save_event"}, {"now", oStart - 300}, {"event", weekly}});
+                app.Execute({{"action", "save_event"}, {"now", oStart - 300}, {"event", weekly2}});
+                const auto view = app.View(oStart - 300);
+                Check(dailyRow(view, "Laptop")["count"] == 2,
+                      "two repeating same-day classes aggregate today's Laptop into one item (count 2)");
+                // Next week the same aggregation holds and days stay separate.
+                const auto nextWeek = app.View(oStart - 300 + 7 * 1440);
+                Check(dailyRow(nextWeek, "Laptop")["count"] == 2,
+                      "next week's occurrences aggregate the same way");
+            }
+
+            // TEST 7: one daily Bring reminder; a repeated Laptop appears once in the body.
+            {
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("calc", "Calculus", oStart, {{"l", "Laptop", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("dsa", "DSA", oStart + 180, {{"l2", "Laptop", .5}})}});
+                const auto view = app.View(oStart - 300);
+                int bringPlans = 0;
+                for (const auto &plan : view["notifications"])
+                    if (plan.at("id") == "day@" + std::to_string(oDay) + ":bring")
+                        ++bringPlans;
+                Check(bringPlans == 1, "exactly one daily Bring reminder for the day");
+                const auto body = dayBringBody(view, oDay);
+                Check(body.find("Laptop") != std::string::npos, "daily Bring lists Laptop");
+                Check(body.find("Laptop") == body.rfind("Laptop"), "Laptop appears exactly once in body");
+            }
+
+            // TEST 8: Bring reminder timing is based on the FIRST relevant event of the day,
+            // with the existing adaptive/late-fallback behaviour preserved.
+            {
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("first", "First", oStart, {{"l", "Laptop", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("late", "Late", oStart + 300, {{"c", "Calculator", .5}})}});
+                // Fallback lead 60 -> bring fires at first event start - 60, not the later event's.
+                auto bringFire = [&](Minute now) -> Minute {
+                    const auto probe = app.View(now);
+                    for (const auto &plan : probe["notifications"])
+                        if (plan.at("id") == "day@" + std::to_string(oDay) + ":bring")
+                            return plan.at("fireAt").get<Minute>();
+                    return -1;
+                };
+                Check(bringFire(oStart - 300) == oStart - 60,
+                      "daily Bring fires at the first relevant event start minus the lead");
+                // Late fallback: intended time already passed but first event not started -> now + 1.
+                const Minute late = oStart - 30;
+                Check(bringFire(late) == late + 1,
+                      "late daily Bring falls back to firing promptly (now + 1)");
+                // Once the first event has started there is no initial daily Bring.
+                bool hasBring = false;
+                const auto startedView = app.View(oStart);
+                for (const auto &plan : startedView["notifications"])
+                    if (plan.at("id") == "day@" + std::to_string(oDay) + ":bring")
+                        hasBring = true;
+                Check(!hasBring, "no daily Bring once the first relevant event has started");
+            }
+
+            // TEST 9 & 10: Bring Back is PER CLASS. Every occurrence gets its own return reminder at
+            // its own end (occurrence.end − returnLead); there is NO end-of-day day@<day>:return.
+            // Names are deduplicated within a class and priority metadata is preserved.
+            {
+                const int rl = Weights{}.returnLead;
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("calc", "Calculus", oStart,
+                                                  {{"l", "Laptop", .5}, {"c", "Calculator", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("dsa", "DSA", oStart + 180,
+                                                  {{"l2", "Laptop", .5}, {"p", "iPad", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("os", "OS", oStart + 360,
+                                                  {{"l3", "Laptop", .5}, {"n", "Notebook", .5}})}});
+                const Minute calcEnd = oStart + 60, dsaEnd = oStart + 240, osEnd = oStart + 420;
+                // Bring every item so each is awaiting return in its own class.
+                auto carry = [&](const std::string &occ, const std::string &id) {
+                    for (const auto *t : {"PACKED", "BROUGHT"})
+                        app.Execute({{"action", "transition"},
+                                     {"now", oStart},
+                                     {"occurrence", occ},
+                                     {"item", id},
+                                     {"target", t}});
+                };
+                const auto calcKey = "calc@" + std::to_string(oDay);
+                const auto dsaKey = "dsa@" + std::to_string(oDay);
+                const auto osKey = "os@" + std::to_string(oDay);
+                carry(calcKey, "l");
+                carry(calcKey, "c");
+                carry(dsaKey, "l2");
+                carry(dsaKey, "p");
+                carry(osKey, "l3");
+                carry(osKey, "n");
+                const auto view = app.View(oStart + 30);
+                // No day-level return reminder must exist.
+                Check(std::none_of(view["notifications"].begin(), view["notifications"].end(),
+                                   [&](const auto &p) {
+                                       return p.at("id") == "day@" + std::to_string(oDay) + ":return";
+                                   }),
+                      "there is no end-of-day day@<day>:return reminder");
+                // Each class has exactly one occurrence-scoped return reminder at its own end.
+                auto returnPlan = [&](const std::string &key) -> nlohmann::json {
+                    for (const auto &p : view["notifications"])
+                        if (p.at("id") == key + ":return")
+                            return p;
+                    return nullptr;
+                };
+                const auto calcReturn = returnPlan(calcKey);
+                const auto dsaReturn = returnPlan(dsaKey);
+                const auto osReturn = returnPlan(osKey);
+                Check(!calcReturn.is_null() && calcReturn.at("fireAt").get<Minute>() == calcEnd - rl,
+                      "Calculus gets its own return reminder at Calculus end");
+                Check(!dsaReturn.is_null() && dsaReturn.at("fireAt").get<Minute>() == dsaEnd - rl,
+                      "DSA gets its own return reminder at DSA end");
+                Check(!osReturn.is_null() && osReturn.at("fireAt").get<Minute>() == osEnd - rl,
+                      "OS gets its own return reminder at OS end");
+                // Each class's Bring Back lists exactly its own items (Laptop once per class).
+                const std::string calcBody = calcReturn.at("body");
+                Check(calcBody.find("Laptop") != std::string::npos &&
+                          calcBody.find("Calculator") != std::string::npos &&
+                          calcBody.find("iPad") == std::string::npos,
+                      "Calculus Bring Back lists only Calculus items");
+                const std::string dsaBody = dsaReturn.at("body");
+                Check(dsaBody.find("Laptop") != std::string::npos &&
+                          dsaBody.find("iPad") != std::string::npos &&
+                          dsaBody.find("Notebook") == std::string::npos,
+                      "DSA Bring Back lists only DSA items");
+                const std::string osBody = osReturn.at("body");
+                Check(osBody.find("Laptop") != std::string::npos &&
+                          osBody.find("Notebook") != std::string::npos &&
+                          osBody.find("Calculator") == std::string::npos,
+                      "OS Bring Back lists only OS items");
+                // TEST 6: an item used only in the first class still gets a Bring Back after it.
+                Check(calcBody.find("Calculator") != std::string::npos,
+                      "first-class-only item (Calculator) still returned after that class");
+                // TEST 7: an item used in later classes too still gets a Bring Back after each class.
+                Check(calcBody.find("Laptop") != std::string::npos &&
+                          dsaBody.find("Laptop") != std::string::npos &&
+                          osBody.find("Laptop") != std::string::npos,
+                      "Laptop is returned after every class it appears in");
+            }
+
+            // TEST 5: after the first class's Bring Back, a repeated item is NOT treated as newly
+            // Needed for the next class — it stays carried and is not asked to be packed again.
+            {
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("calc", "Calculus", oStart, {{"l", "Laptop", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("dsa", "DSA", oStart + 180, {{"l2", "Laptop", .5}})}});
+                const auto calcKey = "calc@" + std::to_string(oDay);
+                const auto dsaKey = "dsa@" + std::to_string(oDay);
+                // Pack the day's Laptop once (propagates to both classes), then carry + return it in
+                // Calculus only.
+                app.Execute({{"action", "transition_day"},
+                             {"now", oStart - 60},
+                             {"day", oDay},
+                             {"name", "Laptop"},
+                             {"target", "PACKED"}});
+                for (const auto *t : {"BROUGHT", "IN_USE", "NEEDS_TO_RETURN", "SAFE"})
+                    app.Execute({{"action", "transition"},
+                                 {"now", oStart + 30},
+                                 {"occurrence", calcKey},
+                                 {"item", "l"},
+                                 {"target", t}});
+                const auto saved = app.Save();
+                // Calculus Laptop is returned (Safe); DSA Laptop is still carried (Packed), NOT Needed.
+                Check(saved["states"][nlohmann::json::array({calcKey, "l"}).dump()] == "SAFE",
+                      "Calculus Laptop is returned after its class");
+                Check(saved["states"][nlohmann::json::array({dsaKey, "l2"}).dump()] == "PACKED",
+                      "the next class's Laptop is not reset to Needed by the first class's Bring Back");
+                // The daily list must not re-prompt to pack Laptop (it is not Needed).
+                const auto view = app.View(oStart + 30);
+                Check(dailyRow(view, "Laptop")["state"] != "NEEDED",
+                      "daily Laptop is not shown as newly Needed after the first class returns it");
+            }
+
+            // ----------------------------------------------------------------------------------
+            // Class-exit from PACKED: a day-packed item appears in each class's Bring Back WITHOUT
+            // any manual PACKED -> BROUGHT step, and a one-tap return_item confirms it per class.
+            // This follows the organic UI flow: mark daily PACKED, which propagates, then confirm.
+            // ----------------------------------------------------------------------------------
+            {
+                const int rl = Weights{}.returnLead;
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("calc", "Calculus", oStart,
+                                                  {{"l", "Laptop", .5}, {"c", "Calculator", .5}})}});
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("dsa", "DSA", oStart + 180,
+                                                  {{"l2", "Laptop", .5}, {"p", "iPad", .5}})}});
+                const auto calcKey = "calc@" + std::to_string(oDay);
+                const auto dsaKey = "dsa@" + std::to_string(oDay);
+                const Minute calcEnd = oStart + 60, dsaEnd = oStart + 240;
+
+                // TEST 1 & 2: mark the DAILY Laptop packed; it propagates to both classes' Laptop.
+                app.Execute({{"action", "transition_day"},
+                             {"now", oStart - 60},
+                             {"day", oDay},
+                             {"name", "Laptop"},
+                             {"target", "PACKED"}});
+                // Calculator is only in Calculus; pack it too (single class) so the example matches.
+                app.Execute({{"action", "transition_day"},
+                             {"now", oStart - 60},
+                             {"day", oDay},
+                             {"name", "Calculator"},
+                             {"target", "PACKED"}});
+                app.Execute({{"action", "transition_day"},
+                             {"now", oStart - 60},
+                             {"day", oDay},
+                             {"name", "iPad"},
+                             {"target", "PACKED"}});
+                {
+                    const auto s = app.Save();
+                    Check(s["states"][nlohmann::json::array({calcKey, "l"}).dump()] == "PACKED" &&
+                              s["states"][nlohmann::json::array({dsaKey, "l2"}).dump()] == "PACKED",
+                          "daily PACKED propagates Laptop to both Calculus and DSA");
+                }
+
+                // TEST 3: at Calculus return time its Bring Back includes Laptop AND Calculator even
+                // though both are still PACKED (no manual PACKED -> BROUGHT performed).
+                auto returnPlan = [&](const nlohmann::json &view, const std::string &key) -> nlohmann::json {
+                    for (const auto &p : view.at("notifications"))
+                        if (p.at("id") == key + ":return")
+                            return p;
+                    return nullptr;
+                };
+                {
+                    const auto view = app.View(calcEnd - rl);
+                    const auto calcReturn = returnPlan(view, calcKey);
+                    Check(!calcReturn.is_null() && calcReturn.at("fireAt").get<Minute>() == calcEnd - rl,
+                          "Calculus return reminder exists at its own end while items are still PACKED");
+                    const std::string body = calcReturn.at("body");
+                    Check(body.find("Laptop") != std::string::npos &&
+                              body.find("Calculator") != std::string::npos,
+                          "Calculus Bring Back includes PACKED Laptop and Calculator");
+                    // The event card marks these as returnable via the one-tap class-exit command.
+                    for (const auto &ev : view.at("events"))
+                        if (ev.at("key") == calcKey)
+                            for (const auto &it : ev.at("items"))
+                                if (it.at("name") == "Laptop")
+                                    Check(it.at("state") == "PACKED" && it.at("canReturn") == true,
+                                          "PACKED Calculus Laptop is flagged returnable for class exit");
+                }
+
+                // TEST 4 & 5: confirming the Calculus return makes ONLY Calculus Laptop SAFE; DSA
+                // Laptop remains PACKED (occurrence isolation).
+                app.Execute(
+                    {{"action", "return_item"}, {"now", calcEnd}, {"occurrence", calcKey}, {"item", "l"}});
+                app.Execute(
+                    {{"action", "return_item"}, {"now", calcEnd}, {"occurrence", calcKey}, {"item", "c"}});
+                {
+                    const auto s = app.Save();
+                    Check(s["states"][nlohmann::json::array({calcKey, "l"}).dump()] == "SAFE",
+                          "return_item completes Calculus Laptop straight to SAFE from PACKED");
+                    Check(s["states"][nlohmann::json::array({calcKey, "c"}).dump()] == "SAFE",
+                          "return_item completes Calculus Calculator to SAFE from PACKED");
+                    Check(s["states"][nlohmann::json::array({dsaKey, "l2"}).dump()] == "PACKED",
+                          "DSA Laptop remains PACKED after confirming the Calculus return");
+                }
+
+                // TEST 6: DSA later produces its own Bring Back still containing the PACKED Laptop.
+                {
+                    const auto view = app.View(dsaEnd - rl);
+                    const auto dsaReturn = returnPlan(view, dsaKey);
+                    Check(!dsaReturn.is_null() && dsaReturn.at("fireAt").get<Minute>() == dsaEnd - rl,
+                          "DSA gets its own return reminder at DSA end");
+                    const std::string body = dsaReturn.at("body");
+                    Check(body.find("Laptop") != std::string::npos && body.find("iPad") != std::string::npos,
+                          "DSA Bring Back still contains its PACKED Laptop and iPad");
+                    // Calculus is now fully returned; it must NOT produce a further return reminder.
+                    Check(returnPlan(view, calcKey).is_null(),
+                          "a fully-returned Calculus no longer produces a return reminder");
+                }
+
+                // TEST 7: an ended class with an unconfirmed PACKED item stays visible/actionable.
+                {
+                    const auto view = app.View(dsaEnd + 30); // both classes ended
+                    bool dsaVisible = false;
+                    for (const auto &ev : view.at("events"))
+                        if (ev.at("key") == dsaKey)
+                            dsaVisible = true;
+                    Check(dsaVisible,
+                          "an ended class with an unconfirmed PACKED item remains actionable in view");
+                }
+
+                // return_item is idempotent: confirming an already-SAFE item is a safe no-op.
+                app.Execute({{"action", "return_item"},
+                             {"now", calcEnd + 5},
+                             {"occurrence", calcKey},
+                             {"item", "l"}});
+                Check(app.Save()["states"][nlohmann::json::array({calcKey, "l"}).dump()] == "SAFE",
+                      "repeating return_item on an already-returned item is a safe no-op");
+
+                // return_item is rejected when there is nothing to bring back yet (Needed).
+                Rejects(
+                    [&] {
+                        app.Execute({{"action", "return_item"},
+                                     {"now", dsaEnd},
+                                     {"occurrence", dsaKey},
+                                     {"item", "p2-missing"}});
+                    },
+                    "return_item on a non-existent item is rejected");
+            }
+
+            // TEST 8: BROUGHT / IN_USE / NEEDS_TO_RETURN still behave correctly and return_item
+            // also completes them to SAFE (the ordinary lifecycle remains available too).
+            {
+                AppState app;
+                app.Execute({{"action", "save_event"},
+                             {"now", oStart - 300},
+                             {"event", classEvent("mid", "Midterm", oStart, {{"l", "Laptop", .5}})}});
+                const auto midKey = "mid@" + std::to_string(oDay);
+                // Ordinary lifecycle still works step by step.
+                for (const auto *t : {"PACKED", "BROUGHT", "IN_USE", "NEEDS_TO_RETURN"})
+                    app.Execute({{"action", "transition"},
+                                 {"now", oStart + 10},
+                                 {"occurrence", midKey},
+                                 {"item", "l"},
+                                 {"target", t}});
+                Check(app.Save()["states"][nlohmann::json::array({midKey, "l"}).dump()] == "NEEDS_TO_RETURN",
+                      "ordinary PACKED->BROUGHT->IN_USE->NEEDS_TO_RETURN lifecycle still works");
+                // A NEEDS_TO_RETURN item is in Bring Back, then return_item completes it to SAFE.
+                const auto midView = app.View(oStart + 60 - Weights{}.returnLead);
+                bool inReturn = false;
+                for (const auto &p : midView["notifications"])
+                    if (p.at("id") == midKey + ":return" &&
+                        std::string(p.at("body")).find("Laptop") != std::string::npos)
+                        inReturn = true;
+                Check(inReturn, "a NEEDS_TO_RETURN item is included in its class Bring Back");
+                app.Execute(
+                    {{"action", "return_item"}, {"now", oStart + 60}, {"occurrence", midKey}, {"item", "l"}});
+                Check(app.Save()["states"][nlohmann::json::array({midKey, "l"}).dump()] == "SAFE",
+                      "return_item completes a NEEDS_TO_RETURN item to SAFE");
+            }
+
+            // Predicate unit coverage: ShouldBringBackFromClass is a PACKED-inclusive superset of
+            // ShouldReturn, and the lifecycle graph itself is unchanged (PACKED cannot jump to SAFE).
+            {
+                Check(ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Packed) &&
+                          ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Brought) &&
+                          ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::InUse) &&
+                          ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::NeedsToReturn),
+                      "ShouldBringBackFromClass is true for PACKED/BROUGHT/IN_USE/NEEDS_TO_RETURN");
+                Check(!ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Needed) &&
+                          !ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Safe) &&
+                          !ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Forgotten) &&
+                          !ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::NotNeeded),
+                      "ShouldBringBackFromClass is false for NEEDED/SAFE/FORGOTTEN/NOT_NEEDED");
+                Check(!ItemLifecycleEngine::ShouldReturn(ItemState::Packed),
+                      "ShouldReturn is unchanged and still excludes PACKED");
+                Check(!ItemLifecycleEngine::CanTransition(ItemState::Packed, ItemState::Safe),
+                      "the ordinary lifecycle graph still forbids PACKED -> SAFE directly");
+            }
+
+            // TEST 11 & 12: daily "mark packed" propagates to all matching same-day requirements
+            // but never touches another day's occurrence.
+            {
+                AppState app;
+                Event weekly = classEvent("calc", "Calculus", oStart, {{"l", "Laptop", .5}});
+                weekly.repeatDays = 1; // daily -> today AND tomorrow have occurrences
+                Event weekly2 = classEvent("dsa", "DSA", oStart + 180, {{"l2", "Laptop", .5}});
+                weekly2.repeatDays = 1;
+                app.Execute({{"action", "save_event"}, {"now", oStart - 300}, {"event", weekly}});
+                app.Execute({{"action", "save_event"}, {"now", oStart - 300}, {"event", weekly2}});
+                // Mark the DAILY Laptop packed for today.
+                app.Execute({{"action", "transition_day"},
+                             {"now", oStart - 60},
+                             {"day", oDay},
+                             {"name", "laptop"}, // normalized match, different casing on purpose
+                             {"target", "PACKED"}});
+                const auto saved = app.Save();
+                // Both of today's underlying Laptop requirements are now PACKED.
+                Check(saved["states"][nlohmann::json::array({"calc@" + std::to_string(oDay), "l"}).dump()] ==
+                              "PACKED" &&
+                          saved["states"]
+                               [nlohmann::json::array({"dsa@" + std::to_string(oDay), "l2"}).dump()] ==
+                              "PACKED",
+                      "daily mark-packed propagates to every matching same-day requirement");
+                // The daily row reads as packed for today.
+                const auto todayView = app.View(oStart - 60);
+                Check(dailyRow(todayView, "Laptop")["state"] == "PACKED",
+                      "the aggregate daily item reads as packed once all today's instances are packed");
+                // Tomorrow's corresponding occurrences are untouched (still Needed).
+                Check(!saved["states"].contains(
+                          nlohmann::json::array({"calc@" + std::to_string(oDay + 1), "l"}).dump()),
+                      "tomorrow's Laptop occurrence is not affected by today's daily transition");
+                const auto tomorrowView = app.View(oStart - 60 + 1440);
+                Check(dailyRow(tomorrowView, "Laptop")["state"] == "NEEDED",
+                      "tomorrow's daily Laptop is still Needed");
+                // Repeated execution is idempotent/safe (already-packed instances are skipped).
+                app.Execute({{"action", "transition_day"},
+                             {"now", oStart - 60},
+                             {"day", oDay},
+                             {"name", "Laptop"},
+                             {"target", "PACKED"}});
+                Check(app.Save()["states"] == saved["states"],
+                      "repeating the daily transition is idempotent");
+                // An instance already further along is not regressed by a day-level PACKED request.
+                app.Execute({{"action", "transition"},
+                             {"now", oStart},
+                             {"occurrence", "calc@" + std::to_string(oDay)},
+                             {"item", "l"},
+                             {"target", "BROUGHT"}});
+                app.Execute({{"action", "transition_day"},
+                             {"now", oStart},
+                             {"day", oDay},
+                             {"name", "Laptop"},
+                             {"target", "PACKED"}});
+                Check(app.Save()["states"]
+                                [nlohmann::json::array({"calc@" + std::to_string(oDay), "l"}).dump()] ==
+                          "BROUGHT",
+                      "a further-along instance is not regressed by a day-level PACKED request");
+            }
+
+            // Normalization unit coverage.
+            {
+                Check(DailyOutingEngine::Normalize(" Laptop ") == "laptop" &&
+                          DailyOutingEngine::Normalize("LAPTOP") == "laptop" &&
+                          DailyOutingEngine::Normalize("laptop") == "laptop",
+                      "Normalize trims whitespace and lower-cases");
             }
         }
 

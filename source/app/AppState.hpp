@@ -51,6 +51,30 @@ class AppState {
 
     void Transition(const std::string &occurrenceKey, const std::string &itemId, ItemState target,
                     Minute now);
+
+    // AdaptiveTiming preferred bring lead for an event (learned when enabled, else fallback).
+    int BringLead(const std::string &eventId) const;
+
+    // Derived one-calendar-day outing: every applicable item of `day`'s occurrences folded into a
+    // deduplicated (normalized-name) daily list, plus the anchors used to schedule the single daily
+    // Bring / end-of-day Bring Back reminders. Purely derived — no Event/Item record is mutated.
+    struct DayOuting {
+        std::vector<DailyOutingEngine::DailyItem> items;
+        bool hasFirstRelevant = false; // an occurrence today still to leave for (end > now)
+        Minute firstRelevantStart = 0; // earliest such occurrence's start (leaving time)
+        int firstRelevantLead = 0;     // that occurrence's bring lead (drives the daily Bring)
+        std::string title;             // representative event title for the day
+    };
+    DayOuting DailyOuting(Minute day, Minute now) const;
+
+    // Fan a normalized-name daily item transition out to every matching same-day occurrence.
+    void TransitionDay(Minute day, const std::string &name, ItemState target, Minute now);
+
+    // Class-exit confirmation for ONE occurrence + item: "I have this with me when leaving this
+    // class." Completes that single occurrence's item to Safe when it is with the student for the
+    // day (Packed) or mid-return (Brought / InUse / NeedsToReturn). Never touches other occurrences
+    // and leaves the ordinary lifecycle graph unchanged for all other flows.
+    void ReturnItem(const std::string &occurrenceKey, const std::string &itemId, Minute now);
 };
 
 } // namespace memory
