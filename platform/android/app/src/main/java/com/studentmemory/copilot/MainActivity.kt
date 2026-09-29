@@ -46,8 +46,6 @@ class MainActivity : Activity() {
     private val green get() = PackBackTheme(this).brand
     private var importKind = "timetable"
     private var importEventId = ""
-    // Session-only identity token. No private service keys are accepted by this client.
-    private var identityToken = ""
     private var showWeek = false
     // Guards against racing/duplicate cloud hydrations (sign-in + resume firing together).
     private val hydrating = AtomicBoolean(false)
@@ -132,7 +130,7 @@ class MainActivity : Activity() {
       } else if (Account.configured) {
         Account.token()
       } else {
-        identityToken
+        ""
       }
     }
     private fun syncEvents() {
@@ -386,12 +384,6 @@ class MainActivity : Activity() {
         button(content, "Weather context") { weather() }
         button(content, "Student memory") { openProFeature(ProFeature.SEMANTIC_STUDENT_MEMORY) }
         if (Account.configured && Account.userId() == null) button(content, "Sign in / create account") { signIn() }
-        if (BuildConfig.BACKEND_URL.isNotBlank()) button(content, "Connect backend session") {
-            val input = EditText(this).apply { hint = "Firebase identity token (or local development token)" }
-            AlertDialog.Builder(this).setTitle("Connect session").setView(input)
-                .setPositiveButton("Connect") { _, _ -> identityToken = input.text.toString().trim() }
-                .setNegativeButton("Cancel", null).show()
-        }
     }
     private fun openProFeature(feature: ProFeature) {
         pendingProFeature = feature
