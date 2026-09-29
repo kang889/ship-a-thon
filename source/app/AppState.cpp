@@ -109,6 +109,102 @@ double AppState::Risk(const Occurrence &occurrence, const Item &item, Minute now
         1.0 - static_cast<double>(std::max<Minute>(0, relevantTime - now)) / mWeights.bringLead;
     return ForgetRiskEngine::Score(stats, item.importance, item.onlyDay >= 0, urgency, mWeights);
 }
+int AppState::BringLead(const std::string &eventId) const {
+    const auto timing = mTiming.find(eventId);
+    return !mAdaptiveTimingEnabled || timing == mTiming.end()
+               ? mWeights.bringLead
+               : AdaptiveTiming::Preferred(timing->second, mWeights.minimumSamples, 15, mWeights.bringLead);
+}
+AppState::DayOuting AppState::DailyOuting(Minute day, Minute now) const {
+    DayOuting outing;
+    std::vector<DailyOutingEngine::Contribution> contributions;
+    // Occurrences are ordered by start, so the first qualifying values captured are the earliest.
+    for (const auto &occurrence : TimetableEngine::Between(mEvents, day, day)) {
+        if (outing.title.empty())
+            outing.title = occurrence.event.title;
+        // The single daily Bring reminder fires when the student leaves for the day's outing: the
+        // first occurrence today that has not finished yet. Its lead honours AdaptiveTiming.
+        if (occurrence.end > now &&
+            (!outing.hasFirstRelevant || occurrence.start < outing.firstRelevantStart)) {
+            outing.firstRelevantStart = occurrence.start;
+            outing.firstRelevantLead = BringLead(occurrence.event.id);
+            outing.hasFirstRelevant = true;
+        }
+        for (const auto &item : occurrence.event.items) {
+            if (item.onlyDay >= 0 && item.onlyDay != day)
+                continue;
+            const auto state = State(occurrence, item);
+            // Classify at the moment the reminder would fire so a future high-risk plan is not
+            // missed; the daily item keeps the maximum priority among its underlying requirements.
+            const auto bringPriority = ReminderDecisionEngine::Classify(
+                Risk(occurrence, item, occurrence.start - outing.firstRelevantLead), mWeights);
+            const auto viewPriority = ReminderDecisionEngine::Classify(Risk(occurrence, item, now), mWeights);
+            contributions.push_back({occurrence.key, item.id, item.name, occurrence.event.title, state,
+                                     std::max(bringPriority, viewPriority)});
+        }
+    }
+    outing.items = DailyOutingEngine::Aggregate(contributions);
+    return outing;
+}
+void AppState::TransitionDay(Minute day, const std::string &name, ItemState target, Minute now) {
+    const auto normalized = DailyOutingEngine::Normalize(name);
+    bool matched = false;
+    // Fan out to every same-day occurrence whose item shares the normalized name. Each underlying
+    // requirement advances through its own valid lifecycle via Transition; instances already at or
+    // beyond the target (further along) are left untouched so the day-level action never regresses
+    // them and stays idempotent on repeat. Other days are never touched (only `day` is queried).
+    for (const auto &occurrence : TimetableEngine::Between(mEvents, day, day)) {
+        for (const auto &item : occurrence.event.items) {
+            if (item.onlyDay >= 0 && item.onlyDay != day)
+                continue;
+            if (DailyOutingEngine::Normalize(item.name) != normalized)
+                continue;
+            matched = true;
+            if (ItemLifecycleEngine::CanTransition(State(occurrence, item), target))
+                Transition(occurrence.key, item.id, target, now);
+        }
+    }
+    if (!matched)
+        throw std::invalid_argument("No matching daily item for that day.");
+}
+void AppState::ReturnItem(const std::string &occurrenceKey, const std::string &itemId, ItemState target,
+                          Minute now) {
+    if (target != ItemState::Safe && target != ItemState::Forgotten)
+        throw std::invalid_argument("Resolve the item as SAFE or FORGOTTEN.");
+    const auto delimiter = occurrenceKey.rfind('@');
+    if (delimiter == std::string::npos)
+        throw std::invalid_argument("Invalid occurrence.");
+    const auto day = std::stoll(occurrenceKey.substr(delimiter + 1));
+    for (const auto &occurrence : TimetableEngine::Between(mEvents, day, day)) {
+        if (occurrence.key != occurrenceKey)
+            continue;
+        for (const auto &item : occurrence.event.items) {
+            if (item.id != itemId || (item.onlyDay >= 0 && item.onlyDay != day))
+                continue;
+            const auto state = State(occurrence, item);
+            // Already resolved to the requested outcome -> idempotent no-op (repeat taps are safe).
+            if (state == target)
+                return;
+            // Class-exit resolution is valid for anything still unresolved for the outing, INCLUDING
+            // NEEDED (the user may simply have forgotten to update PackBack). This is a deliberate,
+            // user-driven shortcut for THIS occurrence only; it does not run through CanTransition
+            // and touches no other class's copy.
+            if (!ItemLifecycleEngine::ShouldResolveAtClassExit(state))
+                throw std::invalid_argument("That item has already been resolved for this class.");
+            mStates[StateKey(occurrenceKey, itemId)] = target;
+            auto &stats = mProfile[ProfileKey(occurrence.event, item)];
+            if (target == ItemState::Safe) {
+                ++stats.returned;
+                stats.lastSuccess = now;
+            } else { // Forgotten: preserve the existing forget-profile bookkeeping.
+                ++stats.forgotten;
+                stats.lastForgotten = now;
+            }
+            return;
+        }
+    }
+    throw std::invalid_argument("Item or occurrence no longer exists.");
+}
 void AppState::Transition(const std::string &occurrenceKey, const std::string &itemId, ItemState target,
                           Minute now) {
     const auto delimiter = occurrenceKey.rfind('@');
@@ -316,6 +412,24 @@ Json AppState::Execute(const Json &command) {
         if (Json(target) != raw)
             throw std::invalid_argument("Unknown item state.");
         Transition(command.at("occurrence"), command.at("item"), target, now);
+    } else if (action == "transition_day") {
+        // Day-level packing: mark a physical item (by normalized name) for the whole day's outing.
+        // All matching same-day requirements advance together; the propagation lives in C++ so the
+        // user never marks the same item packed once per class.
+        const auto raw = command.at("target").get<std::string>();
+        const auto target = command.at("target").get<ItemState>();
+        if (Json(target) != raw)
+            throw std::invalid_argument("Unknown item state.");
+        TransitionDay(command.at("day").get<Minute>(), command.at("name").get<std::string>(), target, now);
+    } else if (action == "return_item") {
+        // Class-exit resolution: "I am leaving this class and resolving this item." Resolves this
+        // single occurrence's item to SAFE ("got it") or FORGOTTEN ("forgot it") from any state
+        // still unresolved for the outing (NEEDED/PACKED/BROUGHT/IN_USE/NEEDS_TO_RETURN).
+        const auto raw = command.at("target").get<std::string>();
+        const auto target = command.at("target").get<ItemState>();
+        if (Json(target) != raw)
+            throw std::invalid_argument("Unknown item state.");
+        ReturnItem(command.at("occurrence"), command.at("item"), target, now);
     } else if (action == "complete_task") {
         bool found = false;
         for (auto &event : mEvents) {
@@ -336,12 +450,19 @@ Json AppState::Execute(const Json &command) {
 }
 Json AppState::View(Minute now) const {
     Json events = Json::array(), tasks = Json::array();
-    std::vector<OccurrenceReminders> reminderInputs;
+    // Bring is grouped for the whole day (day@<day>:bring), but Bring Back stays PER CLASS: every
+    // occurrence gets its own <occurrenceKey>:return reminder at its own end. These per-occurrence
+    // return inputs are collected while the event detail cards are built below.
+    std::vector<OccurrenceReminders> returnInputs;
+    const auto normalTemplate = mTemplates.value("NORMAL", Json::object());
     const auto occurrences = TimetableEngine::Between(mEvents, now / 1440 - 1, now / 1440 + 7);
     for (const auto &occurrence : occurrences) {
+        // An ended class stays visible/actionable while any attached item is still unresolved for
+        // the outing (NEEDED/PACKED/BROUGHT/IN_USE/NEEDS_TO_RETURN). This lets PackBack help even if
+        // the user never touched the app; only NOT_NEEDED, SAFE or FORGOTTEN drop the occurrence.
         const bool awaitingReturn =
             std::any_of(occurrence.event.items.begin(), occurrence.event.items.end(), [&](const auto &item) {
-                return ItemLifecycleEngine::ShouldReturn(State(occurrence, item));
+                return ItemLifecycleEngine::ShouldResolveAtClassExit(State(occurrence, item));
             });
         if (occurrence.end < now && !awaitingReturn)
             continue;
@@ -350,9 +471,17 @@ Json AppState::View(Minute now) const {
             !mAdaptiveTimingEnabled || timing == mTiming.end()
                 ? mWeights.bringLead
                 : AdaptiveTiming::Preferred(timing->second, mWeights.minimumSamples, 15, mWeights.bringLead);
+        // Per-event detail card items. The event remains the source of truth for WHY an item is
+        // required, so each class card still lists exactly what that class needs. Daily
+        // deduplication and packing state are derived separately below; Bring Back stays per class.
+        static_cast<void>(lead);
         Json items = Json::array();
-        std::string bring, back;
-        auto maxBring = Priority::Low, maxReturn = Priority::Low;
+        // Per-occurrence Bring Back: items of THIS class currently awaiting return, deduplicated by
+        // normalized name (a class rarely repeats a name, but keep it safe) with the maximum return
+        // priority among them retained as metadata.
+        std::string back;
+        std::vector<std::string> backNormalized;
+        auto maxReturn = Priority::Low;
         for (const auto &item : occurrence.event.items) {
             if (item.onlyDay >= 0 && item.onlyDay != occurrence.start / 1440)
                 continue;
@@ -370,26 +499,40 @@ Json AppState::View(Minute now) const {
                 if (ItemLifecycleEngine::CanTransition(state, target))
                     actions.push_back(target);
             }
+            // Class-exit resolution applies to any item still unresolved for the outing, INCLUDING
+            // a NEEDED item the user never touched. The Bring Back UI uses this flag to offer a
+            // one-tap "Got it" (SAFE) / "Forgot it" (FORGOTTEN) resolution via `return_item`,
+            // instead of walking the ordinary NEEDED -> PACKED -> ... -> SAFE lifecycle by hand.
+            const bool canReturn = ItemLifecycleEngine::ShouldResolveAtClassExit(state);
             items.push_back({{"id", item.id},
                              {"name", item.name},
                              {"state", state},
                              {"risk", risk},
                              {"priority", PriorityName(priority)},
                              {"reason", reason},
-                             {"actions", actions}});
-            if (state == ItemState::Needed) {
-                bring += (bring.empty() ? "" : ", ") + item.name;
-                // Use the score at firing time so a future high-risk plan is not missed.
-                maxBring = std::max(maxBring, ReminderDecisionEngine::Classify(
-                                                  Risk(occurrence, item, occurrence.start - lead), mWeights));
-            }
-            if (ItemLifecycleEngine::ShouldReturn(state)) {
-                back += (back.empty() ? "" : ", ") + item.name;
+                             {"actions", actions},
+                             {"canReturn", canReturn}});
+            if (canReturn) {
+                const auto normalized = DailyOutingEngine::Normalize(item.name);
+                if (std::find(backNormalized.begin(), backNormalized.end(), normalized) ==
+                    backNormalized.end()) {
+                    backNormalized.push_back(normalized);
+                    back += (back.empty() ? "" : ", ") + item.name;
+                }
+                // Score at the return-reminder fire time so a future high-risk plan is not missed.
                 maxReturn = std::max(
                     maxReturn, ReminderDecisionEngine::Classify(
                                    Risk(occurrence, item, occurrence.end - mWeights.returnLead), mWeights));
             }
         }
+        // One Bring Back reminder for THIS class at its own end (occurrence.end − returnLead), so the
+        // student is prompted to take that class's items when leaving that class/location. The empty
+        // list is dropped by the plan engine. Bring is intentionally NOT added here (day-level only).
+        returnInputs.push_back({occurrence.key, occurrence.event.title, /*bringItems=*/std::string{}, back,
+                                normalTemplate.value("bring", "Bring: "),
+                                normalTemplate.value("return", "Before you go, check: "),
+                                /*bringFireAt=*/now, occurrence.end - mWeights.returnLead, Priority::Low,
+                                maxReturn});
         bool overlap = false;
         for (const auto &other : occurrences)
             if (other.key != occurrence.key && TimetableEngine::Overlaps(occurrence, other))
@@ -406,22 +549,6 @@ Json AppState::View(Minute now) const {
                           {"phase", phase},
                           {"overlap", overlap},
                           {"items", items}});
-        const auto normal = mTemplates.value("NORMAL", Json::object());
-        // AdaptiveTiming decides the INTENDED bring time. If that moment has already passed but
-        // the event has not started (late-added item/event, app reopened, refresh past the minute),
-        // fall back to firing promptly (now + 1) so the reminder is still delivered. Once the event
-        // has started there is no initial Bring reminder. This late fallback never feeds AdaptiveTiming.
-        const Minute intendedBring = occurrence.start - lead;
-        const Minute bringFireAt = now < intendedBring ? intendedBring
-                                   : now < occurrence.start
-                                       ? now + 1
-                                       : intendedBring; // in the past; dropped by the engine
-        // Hand the deterministic per-occurrence results to the plan engine; it owns
-        // how these become the actual bring/return notifications.
-        reminderInputs.push_back({occurrence.key, occurrence.event.title, bring, back,
-                                  normal.value("bring", "Bring: "),
-                                  normal.value("return", "Before you go, check: "), bringFireAt,
-                                  occurrence.end - mWeights.returnLead, maxBring, maxReturn});
     }
     for (const auto &event : mEvents) {
         for (const auto &task : event.tasks) {
@@ -516,28 +643,72 @@ Json AppState::View(Minute now) const {
         umbrellaPlan = {mUmbrellaPackedDay != today, today, umbrellaFireAt,
                         "Bring: Umbrella · rain likely around today's events"};
     }
-    for (const auto &occurrence : TimetableEngine::Between(mEvents, today, today)) {
-        for (const auto &item : occurrence.event.items) {
-            if (item.onlyDay >= 0 && item.onlyDay != today)
-                continue;
-            const auto state = State(occurrence, item);
-            Json actions = Json::array();
-            for (const auto target :
-                 {ItemState::Packed, ItemState::Brought, ItemState::InUse, ItemState::NeedsToReturn,
-                  ItemState::Safe, ItemState::Forgotten, ItemState::NotNeeded})
-                if (ItemLifecycleEngine::CanTransition(state, target))
-                    actions.push_back(target);
-            todayBring.push_back({{"id", item.id},
-                                  {"name", item.name},
-                                  {"eventTitle", occurrence.event.title},
-                                  {"eventStart", occurrence.start},
-                                  {"occurrence", occurrence.key},
-                                  {"state", state},
-                                  {"priority", PriorityName(ReminderDecisionEngine::Classify(
-                                                   Risk(occurrence, item, now), mWeights))},
-                                  {"actions", actions},
-                                  {"weather", false}});
+    // Today's deduplicated daily packing list: the UNION of every applicable item required by any
+    // of today's occurrences, folded by normalized name so each physical item appears exactly once.
+    const auto todayOuting = DailyOuting(today, now);
+    for (const auto &item : todayOuting.items) {
+        // Available actions come from the aggregate daily state; tapping fans out to every matching
+        // same-day occurrence (transition_day). A daily row that is already fully returned/packed
+        // simply offers whatever transitions remain valid for its representative state.
+        Json actions = Json::array();
+        for (const auto target :
+             {ItemState::Packed, ItemState::Brought, ItemState::InUse, ItemState::NeedsToReturn,
+              ItemState::Safe, ItemState::Forgotten, ItemState::NotNeeded})
+            if (ItemLifecycleEngine::CanTransition(item.state, target))
+                actions.push_back(target);
+        Json titles = Json::array();
+        for (const auto &title : item.titles)
+            titles.push_back(title);
+        todayBring.push_back(
+            {{"id", item.sources.empty() ? std::string{} : item.sources.front().second},
+             {"name", item.name},
+             {"normalized", item.normalized},
+             {"dayItem", true},
+             {"day", today},
+             {"count", item.count},
+             {"eventTitles", titles},
+             // First requiring class labels the row when there is a single class;
+             // the UI shows "Needed for N classes" when count > 1.
+             {"eventTitle", item.titles.empty() ? std::string{} : item.titles.front()},
+             {"eventStart", todayOuting.firstRelevantStart},
+             {"occurrence", item.sources.empty() ? std::string{} : item.sources.front().first},
+             {"state", item.state},
+             {"priority", PriorityName(item.priority)},
+             {"actions", actions},
+             {"weather", false}});
+    }
+    // ------------------------------------------------------------------
+    // ONE daily Bring reminder per calendar day  +  per-class Bring Back.
+    // ------------------------------------------------------------------
+    // Packing is grouped for the whole day: duplicated items collapse into ONE day@<day>:bring that
+    // fires when the student leaves (first relevant event − lead, with the late fallback) and bundles
+    // the deduplicated union of still-needed items. Bring Back is NOT day-level — each class keeps its
+    // own <occurrenceKey>:return (built above in `returnInputs`) so the student is reminded to take a
+    // class's items with them when that class ends, at occurrence.end − returnLead.
+    std::vector<OccurrenceReminders> reminderInputs = returnInputs;
+    for (Minute day = now / 1440 - 1; day <= now / 1440 + 7; ++day) {
+        const auto outing = DailyOuting(day, now);
+        std::string bring;
+        auto bringPriority = Priority::Low;
+        for (const auto &item : outing.items) {
+            if (item.state == ItemState::Needed) {
+                bring += (bring.empty() ? "" : ", ") + item.name;
+                bringPriority = std::max(bringPriority, item.priority);
+            }
         }
+        // Bring timing: intended = first relevant event start − lead. If already past but the event
+        // has not started, fire promptly (now + 1); once it has started there is no initial Bring.
+        // This late fallback never feeds AdaptiveTiming (no transition happens here).
+        Minute bringFireAt = now; // in the past → dropped by the engine when there is no relevant event
+        if (outing.hasFirstRelevant) {
+            const Minute intended = outing.firstRelevantStart - outing.firstRelevantLead;
+            bringFireAt = now < intended ? intended : now < outing.firstRelevantStart ? now + 1 : intended;
+        }
+        // The day-level input carries no Bring Back list (empty backItems → no day-level return plan).
+        reminderInputs.push_back({"day@" + std::to_string(day), outing.title, bring,
+                                  /*backItems=*/std::string{}, normalTemplate.value("bring", "Bring: "),
+                                  normalTemplate.value("return", "Before you go, check: "), bringFireAt,
+                                  /*returnFireAt=*/now, bringPriority, Priority::Low});
     }
     const auto reminders = NotificationPlanEngine::Build(reminderInputs, umbrellaPlan, now);
     Json plans = Json::array();
