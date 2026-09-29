@@ -13,3 +13,8 @@ __pycache__/
 local.properties
 .idea/
 *.iml
+
+# Generated CMake build directories (never commit build artifacts)
+out-ci/
+out-ci-wsl/
+out-*/

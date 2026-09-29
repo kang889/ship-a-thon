@@ -32,6 +32,7 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
     private val bringSuggestions = listOf("Laptop", "Notebook", "Calculator", "Graphic calculator",
@@ -48,18 +49,26 @@ class MainActivity : Activity() {
     // Session-only identity token. No private service keys are accepted by this client.
     private var identityToken = ""
     private var showWeek = false
+    // Guards against racing/duplicate cloud hydrations (sign-in + resume firing together).
+    private val hydrating = AtomicBoolean(false)
+    // Identity the current CoreStore is scoped to: null = anonymous/signed-out, otherwise a UID.
+    private var storeUserId: String? = null
     private var showProfile = false
     private var pendingProFeature: ProFeature? = null
     private val profilePrefs by lazy { getSharedPreferences("student_profile", Context.MODE_PRIVATE) }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        store = CoreStore(this)
         Account.initialize(this)
+        // Select the local store for whoever is currently authenticated (anonymous before sign-in).
+        storeUserId = Account.userId()
+        store = CoreStore(this, storeUserId)
         Billing.configure(this)
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
     }
     override fun onResume() {
         super.onResume()
+        // Re-point the store at the current account before rendering, in case it changed.
+        syncStoreToAccount()
         run(JSONObject().put("action", "view"))
         val lat = profilePrefs.getString("latitude", "")?.toDoubleOrNull()
         val lon = profilePrefs.getString("longitude", "")?.toDoubleOrNull()
@@ -68,7 +77,8 @@ class MainActivity : Activity() {
             System.currentTimeMillis() - profilePrefs.getLong("last_weather_attempt", 0L) > 30 * 60 * 1000L) {
             loadRealWeather(lat, lon)
         }
-        // Pro state comes from RevenueCat CustomerInfo (SDK-cached). Re-render only if it flips.
+        // Pro state comes from RevenueCat CustomerInfo. When signed out or Pro is inactive,
+        // turn off the adaptive-timing Pro feature; otherwise refresh the UI. (from main)
         if (Account.userId() == null) {
             Billing.clearSession()
             if (state.optBoolean("adaptiveTimingEnabled", false))
@@ -78,6 +88,18 @@ class MainActivity : Activity() {
                 run(JSONObject().put("action", "adaptive_timing").put("enabled", false))
             else render(currentView)
         } }
+        // Pull cloud events for the signed-in user (no-op when unauthenticated/offline). (from deploy)
+        hydrateFromCloud()
+    }
+    // Rebuild the CoreStore when the authenticated identity changes so each user reads and writes
+    // only their own local file. Other users' files are never touched, so switching back restores
+    // that account's own state. Returns true when the store was re-pointed. (from deploy)
+    private fun syncStoreToAccount(): Boolean {
+        val current = Account.userId()
+        if (current == storeUserId) return false
+        storeUserId = current
+        store = CoreStore(this, current)
+        return true
     }
     private fun run(command: JSONObject): Boolean {
         try {
@@ -85,7 +107,7 @@ class MainActivity : Activity() {
             state = result.getJSONObject("state")
             val view = result.getJSONObject("view")
             currentView = view
-            Reminders.schedule(this, view.getJSONArray("notifications"))
+            Reminders.schedule(this, view.getJSONArray("notifications"), storeUserId)
             render(view)
             return true
         } catch (error: Exception) {
@@ -133,6 +155,61 @@ class MainActivity : Activity() {
             }
         }
      }.start()
+    }
+    // Pull this Firebase user's cloud events and hydrate them into the local C++ state.
+    // Additive and non-destructive: the C++ cloud_hydrate command dedupes by event id and
+    // preserves any existing local event. Local state is only touched after a successful,
+    // validated fetch, so network/auth/parse failures never disturb offline functionality.
+    private fun hydrateFromCloud() {
+        // Ensure the local store belongs to the currently authenticated account before any
+        // cloud events are merged, so one user's cloud data can never land in another's store.
+        if (syncStoreToAccount()) run(JSONObject().put("action", "view"))
+        // Auth safety: only fetch when a real Firebase user is signed in with an obtainable token.
+        if (BuildConfig.BACKEND_URL.isBlank() || !Account.configured || Account.userId() == null) return
+        // In-flight guard: skip if a hydration is already running (sign-in + resume can overlap).
+        if (!hydrating.compareAndSet(false, true)) return
+        Thread {
+            try {
+                val token = Account.token() // throws if the token cannot be obtained → skip safely
+                // GET /api/v1/events returns a top-level JSON array of this user's events.
+                val events = BackendClient(token).requestArray("/events")
+                // The merge, state update, scheduling and render run on the UI thread. Because
+                // runOnUiThread is asynchronous, the in-flight guard is released INSIDE that posted
+                // block (both success and failure) — never here — so it stays held until the UI
+                // hydration has actually completed.
+                runOnUiThread {
+                    try {
+                        // One C++ command performs the merge; C++ owns all state logic.
+                        val hydrated = store.execute(
+                            JSONObject().put("action", "cloud_hydrate").put("events", events)
+                        )
+                        state = hydrated.getJSONObject("state")
+                        currentView = hydrated.getJSONObject("view")
+                        // Reschedule exactly once for the updated state; ids are stable so repeated
+                        // hydration does not create duplicate alarms/notifications.
+                        Reminders.schedule(this, currentView.getJSONArray("notifications"), storeUserId)
+                        render(currentView)
+                    } catch (error: Exception) {
+                        // A hydrate/merge failure must not disturb the existing local state.
+                        // Diagnostic: surface and log the actual error (temporary).
+                        android.util.Log.e("CloudSync", "Cloud hydrate/merge failed", error)
+                        Toast.makeText(this, "Cloud sync failed: ${friendly(error, "Unknown cloud sync error")}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        // Released only after the posted UI hydration has finished.
+                        hydrating.set(false)
+                    }
+                }
+            } catch (error: Exception) {
+                // Network / auth / fetch failure: nothing was posted to the UI thread, so release
+                // the guard here and keep all local events unchanged (offline-first).
+                hydrating.set(false)
+                // Diagnostic: surface and log the actual error (temporary).
+                android.util.Log.e("CloudSync", "Cloud fetch failed", error)
+                runOnUiThread {
+                    Toast.makeText(this, "Cloud sync failed: ${friendly(error, "Unknown cloud sync error")}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
     private fun time(minute: Long) = LocalDateTime.ofEpochSecond(minute * 60, 0, ZoneOffset.UTC)
         .format(DateTimeFormatter.ofPattern("EEE d MMM · HH:mm"))
@@ -361,7 +438,7 @@ class MainActivity : Activity() {
                     if (event.optString("id") != ids.optString(0)) continue
                     val items = event.optJSONArray("items") ?: JSONArray()
                     for (j in 0 until items.length()) if (items.getJSONObject(j).optString("id") == ids.optString(1))
-                        label = "${items.getJSONObject(j).optString("name")} · ${event.optString("title")}" 
+                        label = "${items.getJSONObject(j).optString("name")} · ${event.optString("title")}"
                 }
             }
             results.add(label to count)
@@ -986,8 +1063,11 @@ class MainActivity : Activity() {
                     Account.signIn(emailText, passwordText, create)
                     runOnUiThread {
                         Toast.makeText(this, "Signed in", Toast.LENGTH_SHORT).show()
+                        // Reset any prior RevenueCat session for the previous account (from main).
                         Billing.clearSession()
-                        render(currentView)
+                        // Re-point the store to this account and pull their cloud events; this also
+                        // re-renders after switching/hydrating (from deploy).
+                        hydrateFromCloud()
                         afterSuccess?.invoke()
                     }
                 } catch (error: Exception) {
@@ -1163,7 +1243,7 @@ class MainActivity : Activity() {
                     val result = store.execute(JSONObject().put("action", "save_event").put("event", event))
                     state = result.getJSONObject("state")
                     currentView = result.getJSONObject("view")
-                    Reminders.schedule(this, currentView.getJSONArray("notifications"))
+                    Reminders.schedule(this, currentView.getJSONArray("notifications"), storeUserId)
                     syncEvents()
                     saveAddOnMemories(event, selected)
                     render(currentView); shown.dismiss()

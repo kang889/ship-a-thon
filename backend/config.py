@@ -42,8 +42,6 @@ class Settings:
             raise ValueError("Paid AI requires LOCAL/PRODUCTION mode and a server OPENAI_API_KEY")
         if settings.memory_mode not in {"semantic", "lexical"}:
             raise ValueError("MEMORY_MODE must be semantic or lexical")
-        if mode == "PRODUCTION" and settings.memory_mode != "semantic":
-            raise ValueError("Production requires semantic memory")
         if not settings.model.strip():
             raise ValueError("AI_MODEL cannot be blank")
         if settings.daily_user_calls < 1 or settings.daily_global_calls < 1:
@@ -52,9 +50,15 @@ class Settings:
             not settings.database_url.startswith("postgresql")
             or not settings.firebase_project
             or not settings.real_ai
-            or not settings.qdrant_key
         ):
             raise ValueError(
-                "Production requires PostgreSQL, Firebase, paid AI opt-in and Qdrant credentials"
+                "Production requires PostgreSQL (DATABASE_URL), Firebase (FIREBASE_PROJECT_ID) "
+                "and paid AI opt-in (ENABLE_PAID_AI)"
+            )
+        # Qdrant credentials are only needed when semantic memory is actually used. This lets a
+        # prototype deployment run PRODUCTION with MEMORY_MODE=lexical and no vector database.
+        if mode == "PRODUCTION" and settings.memory_mode == "semantic" and not settings.qdrant_key:
+            raise ValueError(
+                "Semantic memory in production requires QDRANT_API_KEY, or set MEMORY_MODE=lexical"
             )
         return settings

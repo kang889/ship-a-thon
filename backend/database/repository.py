@@ -36,6 +36,12 @@ class QuotaExceeded(Exception):
 
 class Repository:
     def __init__(self, url: str):
+        # SQLAlchemy maps the bare "postgresql://" scheme to the psycopg2 driver, which this
+        # project does not install. Select the installed Psycopg 3 driver by normalising only
+        # that scheme prefix; explicit drivers (e.g. postgresql+psycopg://) and other URLs are
+        # left untouched. Only the scheme is rewritten, so credentials are never inspected.
+        if url.startswith("postgresql://"):
+            url = "postgresql+psycopg://" + url[len("postgresql://") :]
         self.engine = create_engine(
             url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {}
         )

@@ -319,3 +319,37 @@ def test_extraction_cache_is_user_scoped(settings):
     alice_second = service.extract("alice", "timetable", request)
     assert alice_second["cached"]
     assert provider.extract.call_count == 2  # one per distinct user, no cross-user reuse
+
+
+def test_sync_then_events_round_trip(client):
+    # Cross-device upload path: /sync uploads events, and the same authenticated user can
+    # then GET them back — the data Device B's cloud hydration would receive.
+    events = [
+        {"id": "lab", "title": "Lab", "start": 30000840, "end": 30000960},
+        {"id": "tut", "title": "Tutorial", "start": 30002280, "end": 30002400},
+    ]
+    synced = client.post("/api/v1/sync", json={"events": events})
+    assert synced.status_code == 200
+    assert {e["id"] for e in synced.json()["events"]} == {"lab", "tut"}
+    fetched = client.get("/api/v1/events")
+    assert fetched.status_code == 200
+    assert {e["id"] for e in fetched.json()} == {"lab", "tut"}
+    # /sync is an additive upsert, not a destructive replace: re-syncing one event keeps both.
+    client.post("/api/v1/sync", json={"events": [events[0]]})
+    assert {e["id"] for e in client.get("/api/v1/events").json()} == {"lab", "tut"}
+
+
+def test_events_are_scoped_by_user_no_cross_user_leak(settings):
+    # User isolation for events: one authenticated user's events must never be returned to
+    # another. Repository-level check because MOCK auth maps the dev token to a single user;
+    # the API layer reads events via this same user-scoped repository.
+    repo = Repository(settings.database_url)
+    repo.put("alice", "event", "lab", '{"id": "lab", "title": "Alice Lab"}')
+    repo.put("bob", "event", "gym", '{"id": "gym", "title": "Bob Gym"}')
+    alice = repo.list("alice", "event")
+    bob = repo.list("bob", "event")
+    assert [e["id"] for e in alice] == ["lab"]
+    assert [e["id"] for e in bob] == ["gym"]
+    # Bob must not receive Alice's event, and vice versa.
+    assert all(e["id"] != "gym" for e in alice)
+    assert all(e["id"] != "lab" for e in bob)

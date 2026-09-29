@@ -706,6 +706,95 @@ int main(int argc, char **argv) {
                       "fallback bringLead still applies without sufficient history");
             }
         }
+
+        // ============================================================================
+        // Cross-device cloud hydration: additive, idempotent, dedupe-by-id, non-destructive
+        // ============================================================================
+        {
+            const Minute hDay = 22000, hStart = hDay * 1440 + 600, hNow = hStart - 120;
+            auto cloudEvent = [&](const std::string &id, const std::string &title) {
+                return nlohmann::json{
+                    {"id", id}, {"title", title}, {"start", hStart}, {"end", hStart + 60}, {"repeatDays", 0}};
+            };
+            auto hydrate = [&](AppState &app, const nlohmann::json &events) {
+                // Force an explicit JSON array to avoid nlohmann brace-init ambiguity for a
+                // single-element list (which would otherwise be read as the object itself).
+                nlohmann::json list = events.is_array() ? events : nlohmann::json::array({events});
+                return app.Execute({{"action", "cloud_hydrate"}, {"now", hNow}, {"events", list}});
+            };
+            auto ids = [](const nlohmann::json &state) {
+                std::vector<std::string> out;
+                for (const auto &e : state.at("events"))
+                    out.push_back(e.at("id"));
+                std::sort(out.begin(), out.end());
+                return out;
+            };
+
+            // 1. Hydrate a missing cloud event -> event added.
+            {
+                AppState app;
+                auto st = hydrate(app, {cloudEvent("cloud-a", "Lecture A")}).at("state");
+                Check(st.at("events").size() == 1 && st.at("events")[0].at("id") == "cloud-a",
+                      "cloud hydrate adds a missing event");
+            }
+            // 2 & 3. Hydrating the same event twice / many times -> no duplicate, state identical.
+            {
+                AppState app;
+                hydrate(app, {cloudEvent("cloud-a", "Lecture A")});
+                const auto afterFirst = app.Save();
+                for (int i = 0; i < 10; ++i)
+                    hydrate(app, {cloudEvent("cloud-a", "Lecture A")});
+                const auto afterMany = app.Save();
+                Check(afterMany.at("events").size() == 1, "repeated hydration keeps a single event");
+                Check(afterFirst.at("events") == afterMany.at("events"),
+                      "hydrating the same event many times leaves state identical");
+            }
+            // 4. A local event with the same ID exists -> local event preserved (not overwritten).
+            {
+                AppState app;
+                Event local;
+                local.id = "cloud-a";
+                local.title = "Local title";
+                local.start = hStart;
+                local.end = hStart + 60;
+                local.repeatDays = 0;
+                app.Execute({{"action", "save_event"}, {"now", hNow}, {"event", local}});
+                auto st = hydrate(app, {cloudEvent("cloud-a", "Cloud title")}).at("state");
+                Check(st.at("events").size() == 1 && st.at("events")[0].at("title") == "Local title",
+                      "existing local event is preserved, not overwritten by cloud data");
+            }
+            // 5. Multiple distinct cloud events -> all added once.
+            {
+                AppState app;
+                auto st = hydrate(app, {cloudEvent("cloud-a", "A"), cloudEvent("cloud-b", "B"),
+                                        cloudEvent("cloud-c", "C")})
+                              .at("state");
+                Check(ids(st) == std::vector<std::string>{"cloud-a", "cloud-b", "cloud-c"},
+                      "multiple distinct cloud events are all added once");
+                // Re-hydrate a mix of existing + new; only the new one is added.
+                auto st2 = hydrate(app, {cloudEvent("cloud-b", "B"), cloudEvent("cloud-d", "D")}).at("state");
+                Check(ids(st2) == std::vector<std::string>{"cloud-a", "cloud-b", "cloud-c", "cloud-d"},
+                      "re-hydration adds only genuinely new events");
+            }
+            // 6. Malformed hydration input -> rejected with no partial mutation.
+            {
+                AppState app;
+                hydrate(app, {cloudEvent("cloud-a", "A")}); // one valid event present
+                const auto before = app.Save();
+                // Second event is invalid (end <= start); the whole batch must be rejected.
+                nlohmann::json bad = nlohmann::json::array();
+                bad.push_back(cloudEvent("cloud-b", "B"));
+                bad.push_back({{"id", "cloud-c"},
+                               {"title", "Bad"},
+                               {"start", hStart},
+                               {"end", hStart},
+                               {"repeatDays", 0}});
+                Rejects([&] { hydrate(app, bad); }, "malformed hydration batch is rejected");
+                Check(app.Save().at("events") == before.at("events"),
+                      "a malformed hydration batch does not partially mutate local state");
+            }
+        }
+
         if (argc > 1) {
             std::ifstream config(std::string(argv[1]) + "/reminder_weights.json");
             const auto configured = nlohmann::json::parse(config).get<Weights>();

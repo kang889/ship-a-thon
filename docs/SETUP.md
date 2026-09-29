@@ -63,7 +63,7 @@ Exactly three modes are supported:
 |---|---|
 | MOCK (default) | SQLite or PostgreSQL, fake extraction/weather, labelled lexical memory retrieval |
 | LOCAL | SQLite or PostgreSQL, Qdrant, local sentence-transformer, real weather, optional paid extraction |
-| PRODUCTION | PostgreSQL, Qdrant, Firebase identity verification, explicitly enabled direct AI |
+| PRODUCTION | PostgreSQL, Firebase identity verification, explicitly enabled direct AI; Qdrant only when `MEMORY_MODE=semantic` (the prototype cloud deploy uses `MEMORY_MODE=lexical`, see [DEPLOYMENT.md](DEPLOYMENT.md)) |
 
 For LOCAL/PRODUCTION, install `backend/requirements-online.txt`. With Compose, set `ONLINE_DEPENDENCIES=true`, `APP_MODE=LOCAL` and rebuild. The pinned MiniLM model downloads once and persists in the `models` volume. It runs on the backend CPU. Memory embeddings are reused unless the text changes; a search embeds only its query, and retrieves at most five user-scoped records without an LLM.
 
