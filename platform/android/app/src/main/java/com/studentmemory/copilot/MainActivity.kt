@@ -167,7 +167,9 @@ class MainActivity : Activity() {
                         render(currentView)
                     } catch (error: Exception) {
                         // A hydrate/merge failure must not disturb the existing local state.
-                        Toast.makeText(this, "Cloud events unavailable; showing local data", Toast.LENGTH_SHORT).show()
+                        // Diagnostic: surface and log the actual error (temporary).
+                        android.util.Log.e("CloudSync", "Cloud hydrate/merge failed", error)
+                        Toast.makeText(this, "Cloud sync failed: ${friendly(error, "Unknown cloud sync error")}", Toast.LENGTH_LONG).show()
                     } finally {
                         // Released only after the posted UI hydration has finished.
                         hydrating.set(false)
@@ -177,8 +179,10 @@ class MainActivity : Activity() {
                 // Network / auth / fetch failure: nothing was posted to the UI thread, so release
                 // the guard here and keep all local events unchanged (offline-first).
                 hydrating.set(false)
+                // Diagnostic: surface and log the actual error (temporary).
+                android.util.Log.e("CloudSync", "Cloud fetch failed", error)
                 runOnUiThread {
-                    Toast.makeText(this, "Cloud sync unavailable; showing local data", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Cloud sync failed: ${friendly(error, "Unknown cloud sync error")}", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()
