@@ -70,11 +70,15 @@ class AppState {
     // Fan a normalized-name daily item transition out to every matching same-day occurrence.
     void TransitionDay(Minute day, const std::string &name, ItemState target, Minute now);
 
-    // Class-exit confirmation for ONE occurrence + item: "I have this with me when leaving this
-    // class." Completes that single occurrence's item to Safe when it is with the student for the
-    // day (Packed) or mid-return (Brought / InUse / NeedsToReturn). Never touches other occurrences
-    // and leaves the ordinary lifecycle graph unchanged for all other flows.
-    void ReturnItem(const std::string &occurrenceKey, const std::string &itemId, Minute now);
+    // Class-exit resolution for ONE occurrence + item: "I am leaving this class and resolving what
+    // happened to this item." Resolves that single occurrence's item to `target` (Safe = "got it" or
+    // Forgotten = "forgot it") from any state still unresolved for the outing — NEEDED, PACKED,
+    // BROUGHT, IN_USE, NEEDS_TO_RETURN — so a user who never touched the app can still resolve it.
+    // It preserves the SAFE/returned and FORGOTTEN/forget bookkeeping, never touches other
+    // occurrences, and leaves the ordinary lifecycle graph (CanTransition) unchanged for all other
+    // flows. `target` must be Safe or Forgotten.
+    void ReturnItem(const std::string &occurrenceKey, const std::string &itemId, ItemState target,
+                    Minute now);
 };
 
 } // namespace memory

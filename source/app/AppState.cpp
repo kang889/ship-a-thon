@@ -167,7 +167,10 @@ void AppState::TransitionDay(Minute day, const std::string &name, ItemState targ
     if (!matched)
         throw std::invalid_argument("No matching daily item for that day.");
 }
-void AppState::ReturnItem(const std::string &occurrenceKey, const std::string &itemId, Minute now) {
+void AppState::ReturnItem(const std::string &occurrenceKey, const std::string &itemId, ItemState target,
+                          Minute now) {
+    if (target != ItemState::Safe && target != ItemState::Forgotten)
+        throw std::invalid_argument("Resolve the item as SAFE or FORGOTTEN.");
     const auto delimiter = occurrenceKey.rfind('@');
     if (delimiter == std::string::npos)
         throw std::invalid_argument("Invalid occurrence.");
@@ -179,18 +182,24 @@ void AppState::ReturnItem(const std::string &occurrenceKey, const std::string &i
             if (item.id != itemId || (item.onlyDay >= 0 && item.onlyDay != day))
                 continue;
             const auto state = State(occurrence, item);
-            // Already returned for this class -> idempotent no-op success (repeat taps are safe).
-            if (state == ItemState::Safe)
+            // Already resolved to the requested outcome -> idempotent no-op (repeat taps are safe).
+            if (state == target)
                 return;
-            // Class-exit confirmation is only valid once the item is with the student for the day
-            // (Packed) or mid-return. This is a deliberate, user-driven shortcut to Safe for THIS
-            // occurrence only; it does not run through CanTransition and touches no other copy.
-            if (!ItemLifecycleEngine::ShouldBringBackFromClass(state))
-                throw std::invalid_argument("There is nothing to bring back for that item yet.");
-            mStates[StateKey(occurrenceKey, itemId)] = ItemState::Safe;
+            // Class-exit resolution is valid for anything still unresolved for the outing, INCLUDING
+            // NEEDED (the user may simply have forgotten to update PackBack). This is a deliberate,
+            // user-driven shortcut for THIS occurrence only; it does not run through CanTransition
+            // and touches no other class's copy.
+            if (!ItemLifecycleEngine::ShouldResolveAtClassExit(state))
+                throw std::invalid_argument("That item has already been resolved for this class.");
+            mStates[StateKey(occurrenceKey, itemId)] = target;
             auto &stats = mProfile[ProfileKey(occurrence.event, item)];
-            ++stats.returned;
-            stats.lastSuccess = now;
+            if (target == ItemState::Safe) {
+                ++stats.returned;
+                stats.lastSuccess = now;
+            } else { // Forgotten: preserve the existing forget-profile bookkeeping.
+                ++stats.forgotten;
+                stats.lastForgotten = now;
+            }
             return;
         }
     }
@@ -413,9 +422,14 @@ Json AppState::Execute(const Json &command) {
             throw std::invalid_argument("Unknown item state.");
         TransitionDay(command.at("day").get<Minute>(), command.at("name").get<std::string>(), target, now);
     } else if (action == "return_item") {
-        // Class-exit one-tap confirmation: "I have this item with me leaving this class."
-        // Completes this single occurrence's item to Safe from Packed/Brought/InUse/NeedsToReturn.
-        ReturnItem(command.at("occurrence"), command.at("item"), now);
+        // Class-exit resolution: "I am leaving this class and resolving this item." Resolves this
+        // single occurrence's item to SAFE ("got it") or FORGOTTEN ("forgot it") from any state
+        // still unresolved for the outing (NEEDED/PACKED/BROUGHT/IN_USE/NEEDS_TO_RETURN).
+        const auto raw = command.at("target").get<std::string>();
+        const auto target = command.at("target").get<ItemState>();
+        if (Json(target) != raw)
+            throw std::invalid_argument("Unknown item state.");
+        ReturnItem(command.at("occurrence"), command.at("item"), target, now);
     } else if (action == "complete_task") {
         bool found = false;
         for (auto &event : mEvents) {
@@ -443,12 +457,12 @@ Json AppState::View(Minute now) const {
     const auto normalTemplate = mTemplates.value("NORMAL", Json::object());
     const auto occurrences = TimetableEngine::Between(mEvents, now / 1440 - 1, now / 1440 + 7);
     for (const auto &occurrence : occurrences) {
-        // An ended class stays visible/actionable while it still has items awaiting collection.
-        // Class-exit semantics: a PACKED item (brought for the day but never manually advanced)
-        // still needs confirming when leaving the class, so it keeps the occurrence in view.
+        // An ended class stays visible/actionable while any attached item is still unresolved for
+        // the outing (NEEDED/PACKED/BROUGHT/IN_USE/NEEDS_TO_RETURN). This lets PackBack help even if
+        // the user never touched the app; only NOT_NEEDED, SAFE or FORGOTTEN drop the occurrence.
         const bool awaitingReturn =
             std::any_of(occurrence.event.items.begin(), occurrence.event.items.end(), [&](const auto &item) {
-                return ItemLifecycleEngine::ShouldBringBackFromClass(State(occurrence, item));
+                return ItemLifecycleEngine::ShouldResolveAtClassExit(State(occurrence, item));
             });
         if (occurrence.end < now && !awaitingReturn)
             continue;
@@ -485,10 +499,11 @@ Json AppState::View(Minute now) const {
                 if (ItemLifecycleEngine::CanTransition(state, target))
                     actions.push_back(target);
             }
-            // Class-exit one-tap return applies whenever the item is with the student for the day
-            // (PACKED) or mid-return. The Bring Back UI uses this to call `return_item` directly,
-            // instead of walking PACKED -> BROUGHT -> NEEDS_TO_RETURN -> SAFE by hand.
-            const bool canReturn = ItemLifecycleEngine::ShouldBringBackFromClass(state);
+            // Class-exit resolution applies to any item still unresolved for the outing, INCLUDING
+            // a NEEDED item the user never touched. The Bring Back UI uses this flag to offer a
+            // one-tap "Got it" (SAFE) / "Forgot it" (FORGOTTEN) resolution via `return_item`,
+            // instead of walking the ordinary NEEDED -> PACKED -> ... -> SAFE lifecycle by hand.
+            const bool canReturn = ItemLifecycleEngine::ShouldResolveAtClassExit(state);
             items.push_back({{"id", item.id},
                              {"name", item.name},
                              {"state", state},

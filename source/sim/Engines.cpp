@@ -84,9 +84,12 @@ bool ItemLifecycleEngine::CanTransition(ItemState from, ItemState to) {
 bool ItemLifecycleEngine::ShouldReturn(ItemState state) {
     return state == ItemState::Brought || state == ItemState::InUse || state == ItemState::NeedsToReturn;
 }
-bool ItemLifecycleEngine::ShouldBringBackFromClass(ItemState state) {
-    // Class-exit superset: PACKED is sufficient evidence the item was brought for the outing.
-    return state == ItemState::Packed || ShouldReturn(state);
+bool ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState state) {
+    // Unresolved-for-the-outing states. NOT_NEEDED is the explicit opt-out; SAFE and FORGOTTEN are
+    // already-resolved outcomes. Everything else (including NEEDED, so a user who forgot to touch
+    // the app is still reminded) is surfaced and resolvable at class exit.
+    return state == ItemState::Needed || state == ItemState::Packed || state == ItemState::Brought ||
+           state == ItemState::InUse || state == ItemState::NeedsToReturn;
 }
 double ForgetRiskEngine::Score(const ForgetStats &stats, double importance, bool unusual, double urgency,
                                const Weights &w) {

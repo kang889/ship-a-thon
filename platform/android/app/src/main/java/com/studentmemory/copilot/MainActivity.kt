@@ -320,13 +320,18 @@ class MainActivity : Activity() {
                 for (j in 0 until items.length()) {
                     val item = items.getJSONObject(j)
                     val actions = item.getJSONArray("actions")
-                    // Class-exit: when C++ marks the item returnable (PACKED/BROUGHT/IN_USE/
-                    // NEEDS_TO_RETURN), one tap confirms "I have this leaving this class" via the
-                    // C++ return_item command — no walking the lifecycle by hand. Otherwise fall
-                    // back to the ordinary per-occurrence transition menu. All rules stay in C++.
+                    // Class-exit: when C++ marks the item resolvable (NEEDED/PACKED/BROUGHT/IN_USE/
+                    // NEEDS_TO_RETURN), offer the two meaningful outcomes — "Got it" (SAFE) or
+                    // "Forgot it" (FORGOTTEN) — resolved for this occurrence via the C++ return_item
+                    // command, no walking the lifecycle by hand. Works even from NEEDED, so a user
+                    // who never updated PackBack can still resolve it. Otherwise fall back to the
+                    // ordinary per-occurrence transition menu. All rules stay in C++.
                     val updateItem: (() -> Unit)? = if (item.optBoolean("canReturn")) ({
-                        run(JSONObject().put("action", "return_item").put("occurrence", event.getString("key"))
-                            .put("item", item.getString("id")))
+                        PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(item.getString("reason"))
+                            .setItems(arrayOf("Got it", "Forgot it")) { _, index ->
+                                run(JSONObject().put("action", "return_item").put("occurrence", event.getString("key"))
+                                    .put("item", item.getString("id")).put("target", if (index == 0) "SAFE" else "FORGOTTEN"))
+                            }.show()
                     }) else if (actions.length() > 0) ({
                         val labels = Array(actions.length()) { actions.getString(it).replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() } }
                         PackBackDialog.Builder(this).setTitle(item.getString("name")).setMessage(item.getString("reason")).setItems(labels) { _, index ->

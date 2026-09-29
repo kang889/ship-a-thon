@@ -415,7 +415,21 @@ int main(int argc, char **argv) {
         const auto next = restored.View(start + 7 * 1440 - 60);
         Check(next["events"][0]["items"][0]["state"] == "NEEDED", "new occurrence resets");
         Check(next["events"][0]["items"][0]["risk"].get<double>() > .7, "next occurrence higher risk");
-        Check(next["notifications"].size() == 2, "one bundled reminder per future occurrence");
+        // Two future occurrences are in the window (next week and the week after). Each yields ONE
+        // day-level bring plus ONE per-class Bring Back — a still-NEEDED item is now surfaced at
+        // class exit so a user who never touched the app is still reminded. So 4 plans total.
+        Check(next["notifications"].size() == 4,
+              "one daily bring + one per-class return per future occurrence");
+        int nextBring = 0, nextReturn = 0;
+        for (const auto &plan : next["notifications"]) {
+            const std::string id = plan.at("id");
+            if (id.find("day@") == 0 && id.find(":bring") != std::string::npos)
+                ++nextBring;
+            if (id.find("lab@") == 0 && id.find(":return") != std::string::npos)
+                ++nextReturn;
+        }
+        Check(nextBring == 2 && nextReturn == 2,
+              "future occurrences use day-scoped bring ids and occurrence-scoped return ids");
         Check(next["notifications"][0]["body"].get<std::string>().find("Laptop") != std::string::npos,
               "reminders bundled");
         FakeBackend fake;
@@ -1202,10 +1216,16 @@ int main(int argc, char **argv) {
 
                 // TEST 4 & 5: confirming the Calculus return makes ONLY Calculus Laptop SAFE; DSA
                 // Laptop remains PACKED (occurrence isolation).
-                app.Execute(
-                    {{"action", "return_item"}, {"now", calcEnd}, {"occurrence", calcKey}, {"item", "l"}});
-                app.Execute(
-                    {{"action", "return_item"}, {"now", calcEnd}, {"occurrence", calcKey}, {"item", "c"}});
+                app.Execute({{"action", "return_item"},
+                             {"now", calcEnd},
+                             {"occurrence", calcKey},
+                             {"item", "l"},
+                             {"target", "SAFE"}});
+                app.Execute({{"action", "return_item"},
+                             {"now", calcEnd},
+                             {"occurrence", calcKey},
+                             {"item", "c"},
+                             {"target", "SAFE"}});
                 {
                     const auto s = app.Save();
                     Check(s["states"][nlohmann::json::array({calcKey, "l"}).dump()] == "SAFE",
@@ -1245,17 +1265,19 @@ int main(int argc, char **argv) {
                 app.Execute({{"action", "return_item"},
                              {"now", calcEnd + 5},
                              {"occurrence", calcKey},
-                             {"item", "l"}});
+                             {"item", "l"},
+                             {"target", "SAFE"}});
                 Check(app.Save()["states"][nlohmann::json::array({calcKey, "l"}).dump()] == "SAFE",
                       "repeating return_item on an already-returned item is a safe no-op");
 
-                // return_item is rejected when there is nothing to bring back yet (Needed).
+                // return_item is rejected for a non-existent item.
                 Rejects(
                     [&] {
                         app.Execute({{"action", "return_item"},
                                      {"now", dsaEnd},
                                      {"occurrence", dsaKey},
-                                     {"item", "p2-missing"}});
+                                     {"item", "p2-missing"},
+                                     {"target", "SAFE"}});
                     },
                     "return_item on a non-existent item is rejected");
             }
@@ -1285,29 +1307,212 @@ int main(int argc, char **argv) {
                         std::string(p.at("body")).find("Laptop") != std::string::npos)
                         inReturn = true;
                 Check(inReturn, "a NEEDS_TO_RETURN item is included in its class Bring Back");
-                app.Execute(
-                    {{"action", "return_item"}, {"now", oStart + 60}, {"occurrence", midKey}, {"item", "l"}});
+                app.Execute({{"action", "return_item"},
+                             {"now", oStart + 60},
+                             {"occurrence", midKey},
+                             {"item", "l"},
+                             {"target", "SAFE"}});
                 Check(app.Save()["states"][nlohmann::json::array({midKey, "l"}).dump()] == "SAFE",
                       "return_item completes a NEEDS_TO_RETURN item to SAFE");
             }
 
-            // Predicate unit coverage: ShouldBringBackFromClass is a PACKED-inclusive superset of
-            // ShouldReturn, and the lifecycle graph itself is unchanged (PACKED cannot jump to SAFE).
+            // Predicate unit coverage: ShouldResolveAtClassExit is true for anything unresolved for
+            // the outing (NEEDED..NEEDS_TO_RETURN), false for the opt-out and resolved outcomes, and
+            // the lifecycle graph itself is unchanged (PACKED still cannot jump to SAFE directly).
             {
-                Check(ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Packed) &&
-                          ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Brought) &&
-                          ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::InUse) &&
-                          ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::NeedsToReturn),
-                      "ShouldBringBackFromClass is true for PACKED/BROUGHT/IN_USE/NEEDS_TO_RETURN");
-                Check(!ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Needed) &&
-                          !ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Safe) &&
-                          !ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::Forgotten) &&
-                          !ItemLifecycleEngine::ShouldBringBackFromClass(ItemState::NotNeeded),
-                      "ShouldBringBackFromClass is false for NEEDED/SAFE/FORGOTTEN/NOT_NEEDED");
-                Check(!ItemLifecycleEngine::ShouldReturn(ItemState::Packed),
-                      "ShouldReturn is unchanged and still excludes PACKED");
-                Check(!ItemLifecycleEngine::CanTransition(ItemState::Packed, ItemState::Safe),
-                      "the ordinary lifecycle graph still forbids PACKED -> SAFE directly");
+                Check(ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::Needed) &&
+                          ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::Packed) &&
+                          ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::Brought) &&
+                          ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::InUse) &&
+                          ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::NeedsToReturn),
+                      "ShouldResolveAtClassExit is true for NEEDED/PACKED/BROUGHT/IN_USE/NEEDS_TO_RETURN");
+                Check(!ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::NotNeeded) &&
+                          !ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::Safe) &&
+                          !ItemLifecycleEngine::ShouldResolveAtClassExit(ItemState::Forgotten),
+                      "ShouldResolveAtClassExit is false for NOT_NEEDED/SAFE/FORGOTTEN");
+                Check(!ItemLifecycleEngine::ShouldReturn(ItemState::Packed) &&
+                          !ItemLifecycleEngine::ShouldReturn(ItemState::Needed),
+                      "ShouldReturn is unchanged and still excludes PACKED and NEEDED");
+                Check(!ItemLifecycleEngine::CanTransition(ItemState::Packed, ItemState::Safe) &&
+                          !ItemLifecycleEngine::CanTransition(ItemState::Needed, ItemState::Safe),
+                      "the ordinary lifecycle graph still forbids resolving straight to SAFE");
+            }
+
+            // ----------------------------------------------------------------------------------
+            // Class-exit from NEEDED: PackBack still helps a user who never touched the app. An item
+            // that stays NEEDED for the whole class is still in that class's Bring Back and can be
+            // resolved SAFE ("got it") or FORGOTTEN ("forgot it"), while later classes are isolated.
+            // ----------------------------------------------------------------------------------
+            {
+                const int rl = Weights{}.returnLead;
+                auto returnPlan = [&](const nlohmann::json &view, const std::string &key) -> nlohmann::json {
+                    for (const auto &p : view.at("notifications"))
+                        if (p.at("id") == key + ":return")
+                            return p;
+                    return nullptr;
+                };
+
+                // TEST 1: an item left NEEDED for the whole class still appears in its Bring Back.
+                {
+                    AppState app;
+                    app.Execute(
+                        {{"action", "save_event"},
+                         {"now", oStart - 300},
+                         {"event", classEvent("mouse", "Lab", oStart, {{"m", "Wireless Mouse", .5}})}});
+                    const auto key = "mouse@" + std::to_string(oDay);
+                    const Minute end = oStart + 60;
+                    const auto view = app.View(end - rl); // 10 min before the class ends
+                    const auto plan = returnPlan(view, key);
+                    Check(!plan.is_null() && plan.at("fireAt").get<Minute>() == end - rl,
+                          "a never-touched NEEDED item still gets a class Bring Back at end - returnLead");
+                    Check(std::string(plan.at("body")).find("Wireless Mouse") != std::string::npos,
+                          "the NEEDED item is named in the Bring Back body");
+                    // The event card flags it resolvable at class exit even though it is NEEDED.
+                    for (const auto &ev : view.at("events"))
+                        if (ev.at("key") == key)
+                            for (const auto &it : ev.at("items"))
+                                if (it.at("name") == "Wireless Mouse")
+                                    Check(it.at("state") == "NEEDED" && it.at("canReturn") == true,
+                                          "a NEEDED item is flagged resolvable at class exit");
+                }
+
+                // TEST 2: a NEEDED item can be resolved SAFE via the class-exit action.
+                {
+                    AppState app;
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("s", "Lab", oStart, {{"m", "Mouse", .5}})}});
+                    const auto key = "s@" + std::to_string(oDay);
+                    app.Execute({{"action", "return_item"},
+                                 {"now", oStart + 60},
+                                 {"occurrence", key},
+                                 {"item", "m"},
+                                 {"target", "SAFE"}});
+                    Check(app.Save()["states"][nlohmann::json::array({key, "m"}).dump()] == "SAFE",
+                          "a NEEDED item can be resolved straight to SAFE at class exit");
+                }
+
+                // TEST 3 & 10: a NEEDED item can be resolved FORGOTTEN, updating forget statistics.
+                {
+                    AppState app;
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("f", "Lab", oStart, {{"m", "Mouse", .5}})}});
+                    const auto key = "f@" + std::to_string(oDay);
+                    app.Execute({{"action", "return_item"},
+                                 {"now", oStart + 60},
+                                 {"occurrence", key},
+                                 {"item", "m"},
+                                 {"target", "FORGOTTEN"}});
+                    const auto s = app.Save();
+                    Check(s["states"][nlohmann::json::array({key, "m"}).dump()] == "FORGOTTEN",
+                          "a NEEDED item can be resolved FORGOTTEN at class exit");
+                    // Forget-profile bookkeeping is preserved (keyed by event id + item id).
+                    const auto profileKey = nlohmann::json::array({"f", "m"}).dump();
+                    Check(s["profile"].contains(profileKey) &&
+                              s["profile"][profileKey]["forgotten"].get<int>() == 1 &&
+                              s["profile"][profileKey]["lastForgotten"].get<Minute>() == oStart + 60,
+                          "resolving FORGOTTEN updates the forget statistics");
+                }
+
+                // TEST 4: a FORGOTTEN item stops appearing in Bring Back.
+                {
+                    AppState app;
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("g", "Lab", oStart, {{"m", "Mouse", .5}})}});
+                    const auto key = "g@" + std::to_string(oDay);
+                    app.Execute({{"action", "return_item"},
+                                 {"now", oStart + 30},
+                                 {"occurrence", key},
+                                 {"item", "m"},
+                                 {"target", "FORGOTTEN"}});
+                    const auto view = app.View(oStart + 60 - rl);
+                    Check(returnPlan(view, key).is_null(),
+                          "a FORGOTTEN item no longer produces a Bring Back reminder");
+                }
+
+                // TEST 5: a SAFE item stops appearing in Bring Back.
+                {
+                    AppState app;
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("h", "Lab", oStart, {{"m", "Mouse", .5}})}});
+                    const auto key = "h@" + std::to_string(oDay);
+                    app.Execute({{"action", "return_item"},
+                                 {"now", oStart + 30},
+                                 {"occurrence", key},
+                                 {"item", "m"},
+                                 {"target", "SAFE"}});
+                    const auto view = app.View(oStart + 60 - rl);
+                    Check(returnPlan(view, key).is_null(),
+                          "a SAFE item no longer produces a Bring Back reminder");
+                }
+
+                // TEST 6: a NOT_NEEDED item never appears in Bring Back (the explicit opt-out).
+                {
+                    AppState app;
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("n", "Lab", oStart, {{"m", "Mouse", .5}})}});
+                    const auto key = "n@" + std::to_string(oDay);
+                    app.Execute({{"action", "transition"},
+                                 {"now", oStart - 100},
+                                 {"occurrence", key},
+                                 {"item", "m"},
+                                 {"target", "NOT_NEEDED"}});
+                    const auto view = app.View(oStart + 60 - rl);
+                    Check(returnPlan(view, key).is_null(),
+                          "a NOT_NEEDED item never produces a Bring Back reminder");
+                }
+
+                // TEST 9: resolving one class's copy does not modify the later classes' copies, even
+                // when the earlier copy is only NEEDED (never packed).
+                {
+                    AppState app;
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("calc", "Calculus", oStart, {{"l", "Laptop", .5}})}});
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("dsa", "DSA", oStart + 180, {{"l2", "Laptop", .5}})}});
+                    app.Execute({{"action", "save_event"},
+                                 {"now", oStart - 300},
+                                 {"event", classEvent("os", "OS", oStart + 360, {{"l3", "Laptop", .5}})}});
+                    const auto calcKey = "calc@" + std::to_string(oDay);
+                    const auto dsaKey = "dsa@" + std::to_string(oDay);
+                    const auto osKey = "os@" + std::to_string(oDay);
+                    // Only DSA and OS are individually packed; the Calculus copy stays NEEDED (the
+                    // user never touched it), which is exactly the case class-exit resolution serves.
+                    app.Execute({{"action", "transition"},
+                                 {"now", oStart - 60},
+                                 {"occurrence", dsaKey},
+                                 {"item", "l2"},
+                                 {"target", "PACKED"}});
+                    app.Execute({{"action", "transition"},
+                                 {"now", oStart - 60},
+                                 {"occurrence", osKey},
+                                 {"item", "l3"},
+                                 {"target", "PACKED"}});
+                    // Resolve the NEEDED Calculus Laptop as FORGOTTEN at class exit.
+                    app.Execute({{"action", "return_item"},
+                                 {"now", oStart + 60},
+                                 {"occurrence", calcKey},
+                                 {"item", "l"},
+                                 {"target", "FORGOTTEN"}});
+                    const auto s = app.Save();
+                    Check(s["states"][nlohmann::json::array({calcKey, "l"}).dump()] == "FORGOTTEN",
+                          "Calculus Laptop resolves FORGOTTEN from NEEDED");
+                    Check(s["states"][nlohmann::json::array({dsaKey, "l2"}).dump()] == "PACKED" &&
+                              s["states"][nlohmann::json::array({osKey, "l3"}).dump()] == "PACKED",
+                          "resolving Calculus does not modify DSA or OS copies");
+                    // DSA still produces its own Bring Back containing Laptop.
+                    const auto dsaView = app.View(oStart + 240 - rl);
+                    const auto dsaReturn = returnPlan(dsaView, dsaKey);
+                    Check(!dsaReturn.is_null() &&
+                              std::string(dsaReturn.at("body")).find("Laptop") != std::string::npos,
+                          "DSA still gets its own Bring Back for its PACKED Laptop");
+                }
             }
 
             // TEST 11 & 12: daily "mark packed" propagates to all matching same-day requirements

@@ -23,12 +23,15 @@ class ItemLifecycleEngine {
     // True while an item is mid-lifecycle and still owed a return in the ordinary sense
     // (Brought / InUse / NeedsToReturn). Unchanged; drives the generic "awaiting return" notion.
     static bool ShouldReturn(ItemState state);
-    // Class-exit semantics only: once an item is PACKED, PackBack treats it as being WITH THE
-    // STUDENT for the day, so at the end of a class a PACKED item that class requires must appear
-    // in that class's Bring Back even if the user never manually advanced PACKED -> BROUGHT. This
-    // is a superset of ShouldReturn (adds PACKED) and is used ONLY for per-class Bring Back listing
-    // and keeping an ended occurrence actionable. It does NOT change the lifecycle graph.
-    static bool ShouldBringBackFromClass(ItemState state);
+    // Class-exit semantics only. PackBack should still help a user who never touched the app, so an
+    // item still attached to a class must be surfaced in that class's Bring Back and remain
+    // actionable until it is resolved — regardless of whether the user ever marked it PACKED. It is
+    // true for anything still unresolved for the outing: NEEDED, PACKED, BROUGHT, IN_USE,
+    // NEEDS_TO_RETURN. It is false for the explicit opt-out (NOT_NEEDED) and for already-resolved
+    // outcomes (SAFE, FORGOTTEN). Used ONLY for per-class Bring Back listing, keeping an ended
+    // occurrence actionable, and the Android "can resolve at class exit" flag. It does NOT change
+    // the lifecycle graph (CanTransition is unchanged).
+    static bool ShouldResolveAtClassExit(ItemState state);
 };
 class ForgetRiskEngine {
   public:
