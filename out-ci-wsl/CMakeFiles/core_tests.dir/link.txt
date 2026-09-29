@@ -1,1 +1,0 @@
-/usr/bin/clang++-18 CMakeFiles/core_tests.dir/tests/CoreTests.cpp.o -o core_tests  libmemory_core.a 

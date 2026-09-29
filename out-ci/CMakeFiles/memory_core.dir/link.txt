@@ -1,2 +1,0 @@
-C:\ProgramData\mingw64\mingw64\bin\ar.exe qc libmemory_core.a CMakeFiles/memory_core.dir/source/sim/Engines.cpp.obj CMakeFiles/memory_core.dir/source/sim/ImportEngine.cpp.obj CMakeFiles/memory_core.dir/source/app/AppState.cpp.obj CMakeFiles/memory_core.dir/source/services/FakeBackend.cpp.obj
-C:\ProgramData\mingw64\mingw64\bin\ranlib.exe libmemory_core.a
