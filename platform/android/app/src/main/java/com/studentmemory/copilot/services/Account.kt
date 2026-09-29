@@ -25,4 +25,6 @@ object Account {
         return Tasks.await(user.getIdToken(false)).token ?: error("Could not obtain identity token")
     }
     fun userId(): String? = if (configured) FirebaseAuth.getInstance().currentUser?.uid else null
+    fun email(): String? = if (configured) FirebaseAuth.getInstance().currentUser?.email else null
+    fun signOut() { if (configured) FirebaseAuth.getInstance().signOut() }
 }

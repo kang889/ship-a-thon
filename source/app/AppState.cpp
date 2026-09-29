@@ -69,6 +69,7 @@ AppState::AppState(const Json &saved, const Weights &weights, const Json &templa
     mMemories = saved.value("memories", Json::object());
     if (saved.contains("timing"))
         mTiming = saved.at("timing").get<decltype(mTiming)>();
+    mAdaptiveTimingEnabled = saved.value("adaptiveTimingEnabled", false);
     std::set<std::string> eventIds;
     for (const auto &event : mEvents) {
         if (!eventIds.insert(event.id).second)
@@ -92,6 +93,7 @@ Json AppState::Save() const {
             {"weatherMock", mWeatherMock},
             {"umbrellaPackedDay", mUmbrellaPackedDay},
             {"timing", mTiming},
+            {"adaptiveTimingEnabled", mAdaptiveTimingEnabled},
             {"memories", mMemories}};
 }
 ItemState AppState::State(const Occurrence &occurrence, const Item &item) const {
@@ -231,7 +233,9 @@ Json AppState::Execute(const Json &command) {
         }
         return {{"ok", true}, {"state", Save()}, {"view", View(now)}, {"preview", preview}, {"mock", mock}};
     }
-    if (action == "weather") {
+    if (action == "adaptive_timing") {
+        mAdaptiveTimingEnabled = command.at("enabled").get<bool>();
+    } else if (action == "weather") {
         std::vector<WeatherHour> hours;
         const auto &points = command.at("hourly");
         if (!points.is_array() || points.size() > 240)
@@ -343,7 +347,7 @@ Json AppState::View(Minute now) const {
             continue;
         const auto timing = mTiming.find(occurrence.event.id);
         const int lead =
-            timing == mTiming.end()
+            !mAdaptiveTimingEnabled || timing == mTiming.end()
                 ? mWeights.bringLead
                 : AdaptiveTiming::Preferred(timing->second, mWeights.minimumSamples, 15, mWeights.bringLead);
         Json items = Json::array();
@@ -469,7 +473,7 @@ Json AppState::View(Minute now) const {
         if (occurrence.end > now && (!hasRelevantEvent || occurrence.start < firstRelevantStart)) {
             firstRelevantStart = occurrence.start;
             const auto timing = mTiming.find(occurrence.event.id);
-            firstRelevantLead = timing == mTiming.end()
+            firstRelevantLead = !mAdaptiveTimingEnabled || timing == mTiming.end()
                                     ? mWeights.bringLead
                                     : AdaptiveTiming::Preferred(timing->second, mWeights.minimumSamples, 15,
                                                                 mWeights.bringLead);
